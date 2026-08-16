@@ -250,3 +250,15 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
 .take summary { font-size: 13px; color: var(--accent-ink); cursor: pointer; margin: 4px 0; }
 .take textarea { margin: 6px 0 8px; }
 .take-reply { font-size: 14.5px; line-height: 1.55; margin: 12px 0 6px; white-space: pre-wrap; }
+
+/* Copy / clear tools */
+.tools { display: flex; gap: 4px; justify-content: flex-end; margin: 4px 0 2px; }
+.toolbtn {
+  display: inline-flex; align-items: center; gap: 4px;
+  background: none; border: 0; color: var(--ink-soft); font: inherit; font-size: 12px;
+  padding: 4px 8px; border-radius: 8px; cursor: pointer;
+  transition: var(--press), background-color 150ms ease, color 150ms ease;
+}
+.toolbtn:active { transform: scale(0.94); background: var(--accent-soft); color: var(--accent-ink); }
+.model-line + .tools { margin-top: 0; }
+.head-right { display: inline-flex; align-items: center; gap: 8px; }

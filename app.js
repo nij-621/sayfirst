@@ -331,7 +331,7 @@ async function startRound(mode) {
   $('srcPill').textContent = settings.src === 'real' ? 'real situation' : 'generated';
   $('answerTitle').textContent = m.answerTitle;
   $('answerHint').textContent = m.hint;
-  $('answerInput').value = ''; $('answerInput').readOnly = false; $('btnGrade').hidden = false;
+  $('answerInput').value = ''; setAnswerLocked(false);
   $('rewriteInput').value = '';
   $('feedbackBox').hidden = true;
   $('regradeBox').hidden = true;
@@ -389,6 +389,39 @@ function renderCriteria(el, grade) {
   </div>`).join('');
 }
 
+// After the first grade the answer is locked; "Edit" unlocks it and turns Grade into "Grade again"
+function setAnswerLocked(locked) {
+  $('answerInput').readOnly = locked;
+  $('btnGrade').hidden = locked;
+  $('btnEditAnswer').hidden = !locked;
+  $('btnGrade').textContent = round?.grade ? 'Grade again' : 'Grade it';
+  if (!locked) $('answerInput').focus();
+}
+
+/* Copy / clear tools attached under text fields and model lines */
+const IC_COPY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
+const IC_CLEAR = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+function attachTools(id, { clear = true } = {}) {
+  const el = $(id);
+  const bar = document.createElement('div');
+  bar.className = 'tools';
+  const copy = document.createElement('button');
+  copy.type = 'button'; copy.className = 'toolbtn'; copy.innerHTML = IC_COPY + '<span>Copy</span>'; copy.setAttribute('aria-label', 'Copy');
+  copy.onclick = async () => {
+    const text = ('value' in el ? el.value : el.textContent).trim();
+    if (!text) { toast('Nothing to copy'); return; }
+    try { await navigator.clipboard.writeText(text); toast('Copied'); } catch { toast('Could not copy'); }
+  };
+  bar.appendChild(copy);
+  if (clear) {
+    const clr = document.createElement('button');
+    clr.type = 'button'; clr.className = 'toolbtn'; clr.innerHTML = IC_CLEAR + '<span>Clear</span>'; clr.setAttribute('aria-label', 'Clear');
+    clr.onclick = () => { if (el.readOnly) return; el.value = ''; el.focus(); };
+    bar.appendChild(clr);
+  }
+  el.insertAdjacentElement('afterend', bar);
+}
+
 async function grade(isRewrite) {
   const input = isRewrite ? $('rewriteInput') : $('answerInput');
   const btn = isRewrite ? $('btnRegrade') : $('btnGrade');
@@ -419,15 +452,18 @@ async function grade(isRewrite) {
       $('regradeBox').scrollIntoView({ behavior: 'smooth', block: 'start' });
     } else {
       stopTimer();
+      // (Re)grading the first attempt resets everything downstream of it
       round.answer = answer; round.grade = g;
+      round.rewrite = ''; round.grade2 = null; round.take = ''; round.takeReply = null;
       $('scoreTotal').innerHTML = `${total(g)}<small>/8</small>`;
       renderCriteria($('criteria'), g);
       $('modelLine').textContent = g.model_line;
       $('modelWhy').textContent = g.why;
       $('rewriteInput').value = answer;
+      $('regradeBox').hidden = true;
+      $('takeInput').value = ''; $('takeOut').hidden = true; $('takeLine').hidden = true;
       $('feedbackBox').hidden = false;
-      $('answerInput').readOnly = true;
-      $('btnGrade').hidden = true;
+      setAnswerLocked(true);
       $('feedbackBox').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   } catch (e) {
@@ -543,6 +579,9 @@ function bind() {
   $('btnGrade').onclick = () => grade(false);
   $('btnRegrade').onclick = () => grade(true);
   $('btnTake').onclick = askTake;
+  $('btnEditAnswer').onclick = () => setAnswerLocked(false);
+  ['realInput', 'audienceInput', 'answerInput', 'rewriteInput', 'takeInput', 'ctxInput'].forEach(id => attachTools(id));
+  ['modelLine', 'takeLine'].forEach(id => attachTools(id, { clear: false }));
   $('btnDone').onclick = () => finishRound(false);
   $('btnAnother').onclick = () => finishRound(true);
   $('btnDeleteEntry').onclick = async () => {
