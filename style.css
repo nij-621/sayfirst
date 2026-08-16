@@ -1,18 +1,21 @@
 /* SayFirst — daily "point first" drill. Serif only on the wordmark and hero; UI is system sans; scores in mono */
+/* Palette (user-picked): #ffffff · #00171f · #003459 · #007ea7 · #00a8e8. Tints are mixes of these five only */
 :root {
-  --paper: #f6f4ee;
-  --card: #fffdf8;
-  --ink: #16171d;
-  --ink-soft: #5c5f6b;
-  --line: #e6e2d6;
-  --accent: #e4572e;
-  --accent-soft: #fbe9e2;
-  --accent-ink: #b73f1c;
-  --good: #2f7d4f;
-  --good-soft: #e3f1e7;
-  --warn: #b7791f;
-  --warn-soft: #faf0d9;
-  --danger: #b73f1c;
+  --paper: #ffffff;
+  --card: color-mix(in srgb, #00a8e8 5%, #ffffff);
+  --ink: #00171f;
+  --ink-soft: #003459;
+  --line: color-mix(in srgb, #007ea7 18%, #ffffff);
+  --accent: #007ea7;
+  --accent-soft: color-mix(in srgb, #00a8e8 14%, #ffffff);
+  --accent-ink: #003459;
+  --good: #007ea7;
+  --good-soft: color-mix(in srgb, #00a8e8 22%, #ffffff);
+  --warn: #003459;
+  --warn-soft: color-mix(in srgb, #003459 12%, #ffffff);
+  --danger: #003459;
+  --primary: #003459;
+  --dot: #00a8e8;
   --radius: 14px;
   --serif: ui-serif, "New York", Georgia, serif;
   --mono: ui-monospace, "SF Mono", Menlo, monospace;
@@ -21,19 +24,21 @@
 }
 @media (prefers-color-scheme: dark) {
   :root {
-    --paper: #16171d;
-    --card: #1f2028;
-    --ink: #f2efe6;
-    --ink-soft: #a3a5b0;
-    --line: #2e3039;
-    --accent: #ff7a55;
-    --accent-soft: #3a2620;
-    --accent-ink: #ff9a7c;
-    --good: #7cc79a;
-    --good-soft: #1f3327;
-    --warn: #e0b35c;
-    --warn-soft: #3a3120;
-    --danger: #ff8a6a;
+    --paper: #00171f;
+    --card: color-mix(in srgb, #003459 45%, #00171f);
+    --ink: #ffffff;
+    --ink-soft: color-mix(in srgb, #ffffff 65%, #00a8e8);
+    --line: color-mix(in srgb, #007ea7 35%, #00171f);
+    --accent: #00a8e8;
+    --accent-soft: color-mix(in srgb, #007ea7 35%, #00171f);
+    --accent-ink: #00a8e8;
+    --good: #00a8e8;
+    --good-soft: color-mix(in srgb, #00a8e8 25%, #00171f);
+    --warn: color-mix(in srgb, #ffffff 60%, #00a8e8);
+    --warn-soft: color-mix(in srgb, #003459 60%, #00171f);
+    --danger: #00a8e8;
+    --primary: #00a8e8;
+    --dot: #00a8e8;
   }
 }
 
@@ -62,7 +67,7 @@ a { color: var(--accent-ink); }
   transition: var(--press);
 }
 .brand:active { transform: scale(0.96); }
-.brand-dot { color: var(--accent); }
+.brand-dot { color: var(--dot); }
 .streak {
   flex: 1; font-family: var(--mono); font-size: 12px; letter-spacing: 0.04em;
   color: var(--ink-soft);
@@ -138,7 +143,7 @@ a { color: var(--accent-ink); }
 }
 .btn:active:not(:disabled) { transform: scale(0.97); }
 .btn.swapping { filter: blur(2px); opacity: 0.6; }
-.btn-primary { background: var(--ink); border-color: var(--ink); color: var(--paper); font-weight: 600; }
+.btn-primary { background: var(--primary); border-color: var(--primary); color: #ffffff; font-weight: 600; }
 .btn-big { width: 100%; padding: 14px; font-size: 17px; margin-top: 12px; }
 .btn-small { padding: 6px 12px; font-size: 13px; }
 .btn-danger { color: var(--danger); border-color: var(--danger); background: none; }
@@ -168,7 +173,7 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
   border: 0; background: var(--card); color: var(--ink-soft); padding: 7px 14px; font-size: 14px; cursor: pointer; font-family: inherit;
   transition: background-color 150ms ease, color 150ms ease;
 }
-.seg button.active { background: var(--ink); color: var(--paper); }
+.seg button.active { background: var(--primary); color: #ffffff; }
 
 /* Practice */
 .practice-head { display: flex; gap: 6px; margin-bottom: 4px; }
@@ -200,9 +205,9 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
   width: 26px; height: 26px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center;
   font-family: var(--mono); font-size: 12px; font-weight: 600;
 }
-.crit-mark.s2 { background: var(--good-soft); color: var(--good); }
-.crit-mark.s1 { background: var(--warn-soft); color: var(--warn); }
-.crit-mark.s0 { background: var(--accent-soft); color: var(--accent-ink); }
+.crit-mark.s2 { background: #00a8e8; color: #ffffff; }
+.crit-mark.s1 { background: color-mix(in srgb, #007ea7 22%, var(--card)); color: var(--accent-ink); }
+.crit-mark.s0 { background: color-mix(in srgb, var(--ink) 10%, var(--card)); color: var(--ink-soft); }
 .crit strong { font-size: 14.5px; display: block; }
 .crit p { font-size: 13.5px; color: var(--ink-soft); margin-top: 2px; line-height: 1.5; }
 .model-line {
