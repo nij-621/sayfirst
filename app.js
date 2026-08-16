@@ -149,6 +149,7 @@ const ISSUES = [
   { key: 'restarts', en: 'Restarts and run-ons — sentences rebuilt mid-way', ko: '문장 재시작·늘어짐' },
   { key: 'wrong_for_listener', en: 'Right content, wrong for this listener', ko: '내용은 맞는데 이 청자에게 안 맞음' },
   { key: 'none', en: 'Honestly, it was fine', ko: '솔직히 괜찮았다' },
+  { key: 'unsure', en: 'I honestly can\'t tell', ko: '잘 모르겠다', selfOnly: true },
 ];
 const issueLabel = k => { const i = ISSUES.find(x => x.key === k); return i ? (settings.lang === 'ko' ? i.ko : i.en) : k; };
 function langName(l) { return l === 'ko' ? 'Korean (한국어)' : 'English'; }
@@ -174,7 +175,9 @@ function analyzePrompt(round, stage, extra = {}) {
   const t = TYPES[round.type];
   const noteRule = {
     first: 'For this FIRST attempt the user has not yet self-diagnosed: keep the note to ONE short factual sentence about where the point appeared. No advice yet.',
-    second: `The user self-diagnosed their first attempt as: "${issueLabel(extra.selfDiag)}". Say in one sentence whether that was the biggest problem or not (be honest). Then give exactly ONE fix — the single change that would most improve THIS attempt — in one or two sentences, quoting their words. Nothing else.`,
+    second: (extra.selfDiag === 'unsure'
+      ? 'The user could not tell what the biggest problem in their first attempt was. Tell them in one plain sentence what it was.'
+      : `The user self-diagnosed their first attempt as: "${issueLabel(extra.selfDiag)}". Say in one sentence whether that was the biggest problem or not (be honest).`) + ` Then give exactly ONE fix — the single change that would most improve THIS attempt — in one or two sentences, quoting their words. Nothing else.`,
     final: 'This is the FINAL attempt with all hints hidden. One sentence: did the point come first, and what is the one thing to carry into the real conversation.',
     near: 'This is a NEAR variant of the real case. One sentence: did they use the same shape, and where did it slip.',
     far: 'This is a FAR variant (different domain, same shape). One sentence: did the shape transfer, and where did it slip.',
@@ -378,7 +381,7 @@ async function renderHome() {
       const mark = a => a ? (hit(a) ? '●' : '○') : '·';
       btn.innerHTML = `<span class="h-title">${esc(r.situation)}</span>
         <span class="h-score">${mark(f)}${mark(l)}<small> point 1st</small></span>
-        <span class="h-meta">${fmtDate(r.createdAt)} · ${TYPES[r.type].label}${r.field?.reasked === false ? ' · field ✓' : r.field?.reasked === true ? ' · re-asked' : ''}${r.recall && !r.recall.doneAt ? ' · recall due ' + fmtDate(r.recall.dueAt) : ''}</span>`;
+        <span class="h-meta">${fmtDate(r.createdAt)} · ${TYPES[r.type].label}${r.quick ? ' · quick' : ''}${r.field?.reasked === false ? ' · field ✓' : r.field?.reasked === true ? ' · re-asked' : ''}${r.recall && !r.recall.doneAt ? ' · recall due ' + fmtDate(r.recall.dueAt) : ''}</span>`;
     } else {
       const tot = g => g ? g.criteria.reduce((a, c) => a + c.score, 0) : null;
       btn.innerHTML = `<span class="h-title">${esc(r.scenario)}</span><span class="h-score">${tot(r.grade)}${r.grade2 ? '→' + tot(r.grade2) : ''}<small>/8</small></span><span class="h-meta">${fmtDate(r.createdAt)} · v1</span>`;
@@ -602,8 +605,21 @@ async function runFlow() {
   $('patternSteps').innerHTML = t.steps.map((s, i) => `<div class="pstep"><span>${i + 1}</span><p>${esc(s)}</p></div>`).join('');
   $('patternHint').textContent = 'Not a script — three slots. Fill them with your own words, out loud.';
   $('patternCard').hidden = false; $('patternCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  await new Promise(res => { $('btnSpeakAgain').onclick = res; });
+  const choice = await new Promise(res => { $('btnSpeakAgain').onclick = () => res('speak'); $('btnSkipToModel').onclick = () => res('skip'); });
   if (my !== sessionToken) return;
+
+  if (choice === 'skip') {
+    // Time-poor path: no second/final attempt. The recall in two days matters more on these days.
+    round.quick = true;
+    setStage('quick · model line');
+    $('patternCard').hidden = true; $('diagCard').hidden = true;
+    $('afterFinal').hidden = false;
+    $('btnExtend').hidden = true;
+    await reveal();
+    $('afterFinal').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    await DB.put(round);
+    return;
+  }
 
   // 4) Second attempt — one fix
   setStage('4 · again, with the shape');
