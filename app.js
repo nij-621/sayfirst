@@ -571,6 +571,7 @@ async function startSession(type, situation, listener, want, src) {
   $('attempts').innerHTML = '';
   ['diagCard', 'patternCard', 'afterFinal', 'revealOut', 'takeOut', 'takeLine', 'speakCard'].forEach(id => $(id).hidden = true);
   $('takeInput').value = ''; $('modelLine').textContent = ''; $('modelWhy').textContent = '';
+  $('btnExtend').hidden = false; $('btnExtend').disabled = false; $('btnExtend').textContent = 'Extend: 2 variants + a follow-up'; $('btnReveal').textContent = 'Reveal a model line';
   $('briefCard').classList.remove('dim');
   show('practice');
   runFlow();
