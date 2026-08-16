@@ -1,7 +1,7 @@
 {
   "name": "SayFirst",
   "short_name": "SayFirst",
-  "description": "Daily drill for saying the point first — your own Claude API key, stored only on your phone",
+  "description": "Daily drill for saying the point first — your own Gemini API key, stored only on your phone",
   "start_url": ".",
   "scope": ".",
   "display": "standalone",

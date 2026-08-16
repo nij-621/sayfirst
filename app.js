@@ -1,10 +1,10 @@
-/* SayFirst — daily "point first" drill. Text goes to the Claude API only when you grade; rounds are stored in this device's IndexedDB */
+/* SayFirst — daily "point first" drill. Text goes to the Gemini API only when you grade; rounds are stored in this device's IndexedDB */
 'use strict';
 
-const API = 'https://api.anthropic.com/v1/messages';
+const API = 'https://generativelanguage.googleapis.com';
 const $ = id => document.getElementById(id);
 const LOCALE = 'en-GB';
-const DEFAULT_MODEL = 'claude-opus-5';
+const DEFAULT_MODEL = 'gemini-2.5-flash';
 
 /* ---------- Settings ---------- */
 const SKEY = 'sayfirst-settings', KKEY = 'sayfirst-apikey';
@@ -23,7 +23,12 @@ const Settings = {
   },
   forgetKey() { localStorage.removeItem(KKEY); sessionStorage.removeItem(KKEY); },
 };
-let settings = Object.assign({ apiKey: '', model: DEFAULT_MODEL, lang: 'en', rememberKey: true, ctx: '', src: 'generated' }, Settings.load());
+let settings = Object.assign({ apiKey: '', model: DEFAULT_MODEL, lang: 'en', rememberKey: true, ctx: '', src: 'generated', modelPicked: false }, Settings.load());
+// v1 stored a Claude model/key — reset to Gemini defaults
+if (!/^gemini/.test(settings.model)) { settings.model = DEFAULT_MODEL; settings.modelPicked = false; }
+if (settings.apiKey && !/^AIza/.test(settings.apiKey)) settings.apiKey = '';
+// MeetMemo lives on the same origin (nij-621.github.io) — reuse its Gemini key if we have none
+if (!settings.apiKey) { const k = localStorage.getItem('protokoll-apikey'); if (k && /^AIza/.test(k)) { settings.apiKey = k; Settings.save(settings); } }
 
 /* ---------- Storage (IndexedDB) ---------- */
 const DB = {
@@ -44,42 +49,67 @@ const DB = {
   del(id) { return DB.req(DB.store('readwrite').delete(id)); },
 };
 
-/* ---------- Claude API ---------- */
+/* ---------- Gemini API (same pattern as MeetMemo) ---------- */
+const authHeaders = extra => ({ 'x-goog-api-key': settings.apiKey, ...extra });
+
 async function apiError(r) {
   let msg = `HTTP ${r.status}`;
   try { msg = (await r.json()).error?.message || msg; } catch {}
-  if (r.status === 401) msg = 'Invalid API key. Check it in Settings.';
+  if ((r.status === 400 || r.status === 403) && /API key/i.test(msg)) msg = 'Invalid API key. Check it in Settings.';
   if (r.status === 429) msg = 'Rate limit reached. Try again in a moment.';
-  if (r.status === 529) msg = 'Claude is overloaded right now. Try again shortly.';
+  if (r.status === 503) msg = 'Gemini is overloaded right now. Try again shortly.';
   return new Error(msg);
+}
+
+// Gemini's responseSchema is an OpenAPI subset: no additionalProperties, enum only on strings
+function geminiSchema(s) {
+  if (Array.isArray(s)) return s.map(geminiSchema);
+  if (!s || typeof s !== 'object') return s;
+  const out = {};
+  for (const [k, v] of Object.entries(s)) {
+    if (k === 'additionalProperties') continue;
+    if (k === 'enum' && s.type !== 'string') continue;
+    out[k] = geminiSchema(v);
+  }
+  return out;
 }
 
 // One structured-output call. Returns the parsed JSON object.
 async function askJSON(system, user, schema, maxTokens = 8192) {
   const body = {
-    model: settings.model,
-    max_tokens: maxTokens,
-    system,
-    // effort is not accepted on Haiku 4.5
-    output_config: settings.model.includes('haiku') ? { format: { type: 'json_schema', schema } } : { effort: 'low', format: { type: 'json_schema', schema } },
-    messages: [{ role: 'user', content: user }],
+    system_instruction: { parts: [{ text: system }] },
+    contents: [{ role: 'user', parts: [{ text: user }] }],
+    generationConfig: { responseMimeType: 'application/json', responseSchema: geminiSchema(schema), maxOutputTokens: maxTokens },
   };
-  const r = await fetch(API, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      'x-api-key': settings.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-    },
-    body: JSON.stringify(body),
+  const r = await fetch(`${API}/v1beta/models/${settings.model}:generateContent`, {
+    method: 'POST', headers: authHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body),
   });
   if (!r.ok) throw await apiError(r);
   const data = await r.json();
-  if (data.stop_reason === 'refusal') throw new Error('The model declined this request. Try rephrasing the situation.');
-  if (data.stop_reason === 'max_tokens') throw new Error('Response was cut off. Try again.');
-  const text = (data.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+  if (data.promptFeedback?.blockReason) throw new Error('Request was blocked: ' + data.promptFeedback.blockReason);
+  const c = data.candidates?.[0];
+  if (c?.finishReason === 'MAX_TOKENS') throw new Error('Response was cut off. Try again.');
+  const text = (c?.content?.parts || []).map(p => p.text || '').join('');
   try { return JSON.parse(text); } catch { throw new Error('Could not read the response. Try again.'); }
+}
+
+async function fetchModels() {
+  const r = await fetch(`${API}/v1beta/models?pageSize=200`, { headers: authHeaders() });
+  if (!r.ok) throw await apiError(r);
+  const data = await r.json();
+  return (data.models || [])
+    .filter(m => (m.supportedGenerationMethods || []).includes('generateContent'))
+    .map(m => m.name.replace('models/', ''))
+    .filter(n => n.startsWith('gemini') && !/embedding|image|tts|live|audio-dialog|robotics|computer-use/.test(n))
+    .sort();
+}
+// Newest stable Flash (gemini-X.Y-flash, no preview/lite/exp)
+function pickDefaultModel(models) {
+  const stable = models
+    .map(n => ({ n, m: n.match(/^gemini-(\d+)(?:\.(\d+))?-flash$/) }))
+    .filter(x => x.m)
+    .sort((a, b) => (+b.m[1] - +a.m[1]) || ((+b.m[2] || 0) - (+a.m[2] || 0)));
+  return stable[0]?.n || models.find(n => /flash/.test(n)) || settings.model;
 }
 
 /* ---------- Prompts ---------- */
@@ -126,7 +156,7 @@ const GRADE_SCHEMA = {
         type: 'object',
         properties: {
           key: { type: 'string', enum: ['point_first', 'framing', 'references', 'sentences'] },
-          score: { type: 'integer', enum: [0, 1, 2] },
+          score: { type: 'integer', description: 'Exactly 0, 1 or 2.', enum: [0, 1, 2] },
           note: { type: 'string', description: 'One or two sentences. Quote the user\'s own words. Say what to change, not just what is wrong.' },
         },
         required: ['key', 'score', 'note'],
@@ -293,7 +323,7 @@ async function generateScenario() {
   try {
     const recent = (await DB.all()).sort((a, b) => b.createdAt - a.createdAt).filter(r => r.mode === round.mode).slice(0, 8).map(r => r.scenario.slice(0, 120));
     const p = scenarioPrompt(round.mode, recent);
-    const s = await askJSON(p.system, p.user, SCENARIO_SCHEMA, 2048);
+    const s = await askJSON(p.system, p.user, SCENARIO_SCHEMA, 4096);
     round.scenario = s.scenario; round.audience = s.audience;
     $('scenarioText').textContent = s.scenario;
     $('scenarioAudience').textContent = s.audience;
@@ -338,7 +368,15 @@ async function grade(isRewrite) {
   btn.disabled = true; const old = btn.textContent; swapLabel(btn, 'Grading…');
   try {
     const p = gradePrompt(round.mode, round.scenario, round.audience, answer, isRewrite ? round.answer : null, isRewrite ? `${total(round.grade)}/8` : null);
-    const g = await askJSON(p.system, p.user, GRADE_SCHEMA);
+    const raw = await askJSON(p.system, p.user, GRADE_SCHEMA);
+    // Normalise: one entry per criterion, in fixed order, score clamped to 0–2
+    const g = {
+      model_line: String(raw.model_line || ''), why: String(raw.why || ''),
+      criteria: CRITERIA.map(c => {
+        const f = (raw.criteria || []).find(x => x.key === c.key) || {};
+        return { key: c.key, score: Math.max(0, Math.min(2, Math.round(+f.score || 0))), note: String(f.note || '') };
+      }),
+    };
     if (isRewrite) {
       round.rewrite = answer; round.grade2 = g;
       $('scoreTotal2').innerHTML = `${total(g)}<small>/8</small>`;
@@ -428,11 +466,14 @@ async function restoreFromFile(file) {
 }
 
 /* ---------- Settings ---------- */
+function fillModelSelect(models, selected = settings.model) {
+  const set = new Set([selected, ...models]);
+  $('modelSel').innerHTML = [...set].map(m => `<option ${m === selected ? 'selected' : ''}>${esc(m)}</option>`).join('');
+}
 function renderSettings() {
   $('apiKeyInput').value = settings.apiKey;
   $('rememberKey').checked = settings.rememberKey !== false;
-  $('modelSel').value = settings.model;
-  if ($('modelSel').value !== settings.model) $('modelSel').value = DEFAULT_MODEL;
+  fillModelSelect([settings.model]);
   $('ctxInput').value = settings.ctx || '';
   document.querySelectorAll('#langSeg button').forEach(b => b.classList.toggle('active', b.dataset.lang === settings.lang));
   show('settings');
@@ -474,13 +515,30 @@ function bind() {
     settings.lang = e.target.dataset.lang;
     document.querySelectorAll('#langSeg button').forEach(b => b.classList.toggle('active', b.dataset.lang === settings.lang));
   };
-  $('btnSaveSettings').onclick = () => {
+  $('btnLoadModels').onclick = async e => {
+    settings.apiKey = $('apiKeyInput').value.trim();
+    if (!settings.apiKey) { toast('Enter your API key first'); return; }
+    e.target.disabled = true;
+    try {
+      const models = await fetchModels();
+      const chosen = settings.modelPicked ? settings.model : pickDefaultModel(models);
+      fillModelSelect(models, chosen);
+      toast(settings.modelPicked ? 'Model list loaded' : `Model list loaded — suggested: ${chosen}`, 4000);
+    } catch (err) { toast(err.message, 5000); }
+    finally { e.target.disabled = false; }
+  };
+  $('btnSaveSettings').onclick = async () => {
     settings.apiKey = $('apiKeyInput').value.trim();
     settings.rememberKey = $('rememberKey').checked;
-    settings.model = $('modelSel').value;
+    const picked = $('modelSel').value || settings.model;
+    // First save with a key and no explicit model choice: pick the newest stable Flash
+    if (!settings.modelPicked && settings.apiKey && picked === DEFAULT_MODEL) {
+      try { settings.model = pickDefaultModel(await fetchModels()); } catch { settings.model = picked; }
+    } else settings.model = picked;
+    settings.modelPicked = !!settings.apiKey;
     settings.ctx = $('ctxInput').value.trim();
     Settings.save(settings);
-    toast('Settings saved');
+    toast(`Settings saved · ${settings.model}`, 3500);
     renderHome();
   };
   $('btnBackup').onclick = backupAll;

@@ -163,7 +163,7 @@ input[type="text"], input[type="password"], textarea, select {
 textarea { resize: vertical; }
 textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .keyrow { display: flex; gap: 8px; align-items: center; }
-.keyrow input { flex: 1; }
+.keyrow input, .keyrow select { flex: 1; }
 .check { display: flex; align-items: center; gap: 8px; padding: 8px 0; font-size: 15px; }
 .check input { width: 18px; height: 18px; accent-color: var(--accent); }
 .hint { font-size: 13px; color: var(--ink-soft); margin: 8px 0; }

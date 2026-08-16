@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SayFirst</title>
-<meta name="description" content="Daily drill for saying the point first — your own Claude API key, stored only on your phone">
+<meta name="description" content="Daily drill for saying the point first — your own Gemini API key, stored only on your phone">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -137,25 +137,25 @@
   <section class="view" id="view-settings" hidden>
     <h2 class="view-title">Settings</h2>
     <div class="field">
-      <label for="apiKeyInput">Anthropic API key</label>
+      <label for="apiKeyInput">Gemini API key</label>
       <div class="keyrow">
-        <input type="password" id="apiKeyInput" placeholder="sk-ant-..." autocomplete="off">
+        <input type="password" id="apiKeyInput" placeholder="AIza..." autocomplete="off">
         <button class="iconbtn" id="btnShowKey" aria-label="Show key" aria-pressed="false">
           <svg class="ic-eye" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>
           <svg class="ic-eye-off" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></svg>
         </button>
       </div>
       <label class="check"><input type="checkbox" id="rememberKey" checked> Remember key on this device</label>
-      <p class="hint">Get a key at <a href="https://platform.claude.com/settings/keys" target="_blank" rel="noopener">platform.claude.com</a>. The key is sent only to api.anthropic.com from this browser and stored only on this device.</p>
+      <p class="hint">Same key as MeetMemo works. Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. The key is sent only to Google from this browser and stored only on this device.</p>
       <button class="btn btn-small btn-danger" id="btnForgetKey">Remove key from this device</button>
     </div>
     <div class="field">
       <label for="modelSel">Model</label>
-      <select id="modelSel">
-        <option value="claude-opus-5">claude-opus-5 (default)</option>
-        <option value="claude-sonnet-5">claude-sonnet-5 (cheaper)</option>
-        <option value="claude-haiku-4-5">claude-haiku-4-5 (fastest)</option>
-      </select>
+      <div class="keyrow">
+        <select id="modelSel"></select>
+        <button class="btn btn-small" id="btnLoadModels">Load list</button>
+      </div>
+      <p class="hint">Load list picks the newest stable Flash model for you the first time; change it here any time. Flash is enough for grading; try a Pro model if the feedback feels shallow.</p>
     </div>
     <div class="field">
       <label>Feedback language</label>
