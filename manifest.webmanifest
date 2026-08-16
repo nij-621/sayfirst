@@ -1,0 +1,14 @@
+{
+  "name": "SayFirst",
+  "short_name": "SayFirst",
+  "description": "Daily drill for saying the point first — your own Claude API key, stored only on your phone",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#f6f4ee",
+  "theme_color": "#16171d",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
