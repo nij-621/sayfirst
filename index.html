@@ -106,6 +106,16 @@
         <h3 id="modelTitle">A stronger version</h3>
         <blockquote class="model-line" id="modelLine"></blockquote>
         <p class="hint" id="modelWhy"></p>
+        <details class="take">
+          <summary>Your take on this version</summary>
+          <p class="hint">Too stiff? Wrong for a live room? Missing something you'd never leave out? Say so — the coach answers and, if you're right, revises the line.</p>
+          <textarea id="takeInput" rows="3" placeholder="e.g. This sounds robotic. I'm opening a meeting with people I know — I'd start warmer."></textarea>
+          <button class="btn btn-small" id="btnTake">Ask</button>
+          <div id="takeOut" hidden>
+            <p class="take-reply" id="takeReply"></p>
+            <blockquote class="model-line" id="takeLine" hidden></blockquote>
+          </div>
+        </details>
       </div>
       <div class="card" id="rewriteBox">
         <h3>Now say it again</h3>

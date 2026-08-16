@@ -125,7 +125,7 @@ const MODES = {
     label: '3-sentence pitch',
     answerTitle: 'Your three sentences',
     hint: 'Exactly three sentences you could say with the screen off: (1) who has what problem, (2) what this does about it, (3) what you want from the people in the room.',
-    shape: 'EXACTLY THREE spoken sentences: (1) who has what problem today, (2) what this thing does about it — the value, not the clicks, (3) what you want from the audience (decision, feedback, adoption, time).',
+    shape: 'THREE spoken parts, each one short sentence (an optional one-sentence opener that orients the room — e.g. acknowledging that some know the tool and some do not — is allowed before them): (1) who has what problem today, (2) what this thing does about it — the value, not the clicks, (3) what you want from the audience (decision, feedback, adoption, time).',
     frame: 'The user is about to demo or present something they built (an internal app, a process, a tool) at work. Their habit is to start narrating the screen ("so here you click...") without ever saying what problem it solves, so a colleague ends up summarising the value for them. The drill: three sentences that frame the demo before any screen is shown.',
   },
 };
@@ -170,6 +170,33 @@ const GRADE_SCHEMA = {
   additionalProperties: false,
 };
 
+const TAKE_SCHEMA = {
+  type: 'object',
+  properties: {
+    reply: { type: 'string', description: 'Two to four sentences answering the user directly: are they right, partly right, or wrong — and why.' },
+    revised_line: { type: 'string', description: 'If the user has a point, a revised model line that keeps the structure but takes their concern on board. Empty string if no change is warranted.' },
+  },
+  required: ['reply', 'revised_line'],
+  additionalProperties: false,
+};
+
+function takePrompt(mode, scenario, audience, answer, modelLine, take) {
+  const m = MODES[mode];
+  return {
+    system: `You are the same speaking coach who just graded a "${m.label}" drill and offered a model line. The user now pushes back or asks about that model line. Answer honestly: if they are right (e.g. the line is too stiff for a live room, misses a human opener, drops something they need), say so and revise. If they are wrong (e.g. they want to bring the story back before the point), say so plainly and keep the line. Never flatter. Keep the four criteria: point first, framing, clear references, clean sentences.
+
+Everyone in the user's workplace is a non-native English speaker: any revised line uses plain words and short sentences (~15 words each), and sounds like something a warm, clear person would say out loud.
+
+Write the reply in ${langName(settings.lang)}; the revised_line stays in English. Output JSON only.`,
+    user: `Scenario: ${scenario}
+Listener: ${audience || 'not specified'}
+User's answer: ${answer}
+Model line you gave: ${modelLine}
+
+User's take: ${take}`,
+  };
+}
+
 function langName(l) { return l === 'ko' ? 'Korean (한국어)' : 'English'; }
 
 function scenarioPrompt(mode, recent) {
@@ -196,6 +223,8 @@ Score each criterion 0–2 (2 = fully there, 1 = partly, 0 = missing):
 - sentences: each sentence is one planned thought — no restarts, no run-ons chaining three ideas with "and… so… but".
 
 Be strict — a 2 means a native colleague would need zero clarifying questions. Notes must quote the user's words and say what to change. Ignore minor grammar unless it hides the meaning; this is about structure. Also penalise answers that ignore the expected shape (e.g. five sentences for the one-liner, or a screen walkthrough for the pitch).
+
+This is SPOKEN language to real colleagues, not an email subject line. A short human opener that orients the room ("I know some of you know this app and some don't, so I'll start from the beginning") is FRAMING, not narrative — do not penalise it, as long as the point follows right after. Penalise only chronological story-telling that delays the point. The model_line should sound like something a warm, clear person would actually say out loud — not a press release.
 
 Everyone in the user's workplace is a non-native English speaker (English is the shared language, nobody's mother tongue). So the model_line must use plain, common words and short sentences — roughly 15 words per sentence, no idioms, no clever phrasing. If it sounds like a native-speaker's polished line, it is wrong. Also give a 0 or 1 on "sentences" when the user's sentence would be hard for a non-native listener to follow.
 
@@ -295,7 +324,8 @@ function stopTimer() { clearInterval(timerId); timerId = null; }
 
 async function startRound(mode) {
   if (!settings.apiKey) { toast('Add your API key in Settings first'); renderSettings(); return; }
-  round = { id: crypto.randomUUID(), createdAt: Date.now(), mode, src: settings.src, scenario: '', audience: '', answer: '', grade: null, rewrite: '', grade2: null };
+  round = { id: crypto.randomUUID(), createdAt: Date.now(), mode, src: settings.src, scenario: '', audience: '', answer: '', grade: null, rewrite: '', grade2: null, take: '', takeReply: null };
+  $('takeInput').value = ''; $('takeOut').hidden = true; $('takeLine').hidden = true;
   const m = MODES[mode];
   $('modePill').textContent = m.label;
   $('srcPill').textContent = settings.src === 'real' ? 'real situation' : 'generated';
@@ -407,6 +437,24 @@ async function grade(isRewrite) {
   }
 }
 
+async function askTake() {
+  const take = $('takeInput').value.trim();
+  const btn = $('btnTake');
+  if (!take || !round?.grade) { toast('Write your take first'); return; }
+  if (btn.disabled) return;
+  btn.disabled = true; swapLabel(btn, 'Thinking…');
+  try {
+    const p = takePrompt(round.mode, round.scenario, round.audience, round.answer, round.grade.model_line, take);
+    const t = await askJSON(p.system, p.user, TAKE_SCHEMA, 4096);
+    round.take = take; round.takeReply = { reply: String(t.reply || ''), revised_line: String(t.revised_line || '').trim() };
+    $('takeReply').textContent = round.takeReply.reply;
+    $('takeLine').textContent = round.takeReply.revised_line;
+    $('takeLine').hidden = !round.takeReply.revised_line;
+    $('takeOut').hidden = false;
+  } catch (e) { toast(e.message, 5000); }
+  finally { btn.disabled = false; swapLabel(btn, 'Ask'); }
+}
+
 async function finishRound(next) {
   if (!round || !round.grade) { renderHome(); return; }
   await DB.put(round);
@@ -429,7 +477,8 @@ async function openDetail(id) {
     <div class="card"><h3>Scenario</h3><p class="detail-q">${esc(r.scenario)}</p>${r.audience ? `<p class="hint">${esc(r.audience)}</p>` : ''}</div>
     <div class="card"><div class="card-head"><h3>First attempt</h3><span class="score">${total(r.grade)}<small>/8</small></span></div>
       <div class="detail-answer">${esc(r.answer)}</div><div class="criteria">${crit(r.grade)}</div></div>
-    <div class="card"><h3>Model line</h3><blockquote class="model-line">${esc(r.grade.model_line)}</blockquote><p class="hint">${esc(r.grade.why)}</p></div>
+    <div class="card"><h3>Model line</h3><blockquote class="model-line">${esc(r.grade.model_line)}</blockquote><p class="hint">${esc(r.grade.why)}</p>
+      ${r.takeReply ? `<p class="hint"><b>Your take:</b> ${esc(r.take)}</p><p class="take-reply">${esc(r.takeReply.reply)}</p>${r.takeReply.revised_line ? `<blockquote class="model-line">${esc(r.takeReply.revised_line)}</blockquote>` : ''}` : ''}</div>
     ${r.grade2 ? `<div class="card"><div class="card-head"><h3>Rewrite</h3><span class="score">${total(r.grade2)}<small>/8</small></span></div>
       <div class="detail-answer">${esc(r.rewrite)}</div><div class="criteria">${crit(r.grade2)}</div></div>` : ''}`;
   show('detail');
@@ -493,6 +542,7 @@ function bind() {
   $('btnRegen').onclick = generateScenario;
   $('btnGrade').onclick = () => grade(false);
   $('btnRegrade').onclick = () => grade(true);
+  $('btnTake').onclick = askTake;
   $('btnDone').onclick = () => finishRound(false);
   $('btnAnother').onclick = () => finishRound(true);
   $('btnDeleteEntry').onclick = async () => {

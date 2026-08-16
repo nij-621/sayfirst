@@ -244,3 +244,9 @@ textarea:focus, input:focus { outline: 2px solid var(--accent); outline-offset: 
   #toast, #toast.leaving { transform: translateX(-50%); }
   #toast { @starting-style { transform: translateX(-50%); } }
 }
+
+/* "Your take" on the model line */
+.take { margin-top: 10px; }
+.take summary { font-size: 13px; color: var(--accent-ink); cursor: pointer; margin: 4px 0; }
+.take textarea { margin: 6px 0 8px; }
+.take-reply { font-size: 14.5px; line-height: 1.55; margin: 12px 0 6px; white-space: pre-wrap; }
