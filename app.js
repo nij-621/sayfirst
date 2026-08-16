@@ -55,12 +55,13 @@ async function apiError(r) {
 }
 
 // One structured-output call. Returns the parsed JSON object.
-async function askJSON(system, user, schema, maxTokens = 4096) {
+async function askJSON(system, user, schema, maxTokens = 8192) {
   const body = {
     model: settings.model,
     max_tokens: maxTokens,
     system,
-    output_config: { effort: 'low', format: { type: 'json_schema', schema } },
+    // effort is not accepted on Haiku 4.5
+    output_config: settings.model.includes('haiku') ? { format: { type: 'json_schema', schema } } : { effort: 'low', format: { type: 'json_schema', schema } },
     messages: [{ role: 'user', content: user }],
   };
   const r = await fetch(API, {
@@ -290,7 +291,7 @@ async function generateScenario() {
   try {
     const recent = (await DB.all()).sort((a, b) => b.createdAt - a.createdAt).filter(r => r.mode === round.mode).slice(0, 8).map(r => r.scenario.slice(0, 120));
     const p = scenarioPrompt(round.mode, recent);
-    const s = await askJSON(p.system, p.user, SCENARIO_SCHEMA, 1024);
+    const s = await askJSON(p.system, p.user, SCENARIO_SCHEMA, 2048);
     round.scenario = s.scenario; round.audience = s.audience;
     $('scenarioText').textContent = s.scenario;
     $('scenarioAudience').textContent = s.audience;
