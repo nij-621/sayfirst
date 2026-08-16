@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>SayFirst</title>
-<meta name="description" content="Daily drill for saying the point first — your own Gemini API key, stored only on your phone">
+<meta name="description" content="Say the point first — speak, get one fix, say it again. Your own Gemini API key, stored only on your phone">
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -32,105 +32,127 @@
   <section class="view" id="view-home" hidden>
     <div class="hero">
       <p class="hero-kicker" id="heroKicker">Today</p>
-      <h1 class="hero-title" id="heroTitle">Say the point first.</h1>
+      <h1 class="hero-title">What do you actually have to say today?</h1>
       <p class="hero-sub" id="heroSub"></p>
     </div>
 
-    <div class="mode-grid">
-      <button class="mode-card" data-mode="oneliner">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/></svg>
-        <strong>One-liner</strong>
-        <span>Before you walk over: the question in one sentence + what you need from them</span>
-      </button>
-      <button class="mode-card" data-mode="pitch">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></svg>
-        <strong>3-sentence pitch</strong>
-        <span>Before a demo: problem → what this does about it → what you want from the room</span>
-      </button>
+    <div id="dueBox" hidden>
+      <h2 class="section-title">Due today — say it again in a new situation</h2>
+      <div id="dueList" class="list"></div>
     </div>
 
-    <div class="src-row">
-      <label>Scenario</label>
-      <div class="seg" id="srcSeg">
-        <button data-src="generated" class="active">Generated</button>
-        <button data-src="real">My real situation</button>
+    <div class="card start">
+      <div class="seg seg-4" id="typeSeg">
+        <button data-type="ask">Ask</button>
+        <button data-type="qa">Q&amp;A</button>
+        <button data-type="update">Update</button>
+        <button data-type="pitch">Pitch</button>
       </div>
+      <p class="hint" id="typeHint"></p>
+      <div class="field">
+        <label for="sitInput">The situation</label>
+        <textarea id="sitInput" rows="4" placeholder="Paste the email, or describe it. What happened, what's the judgment call?"></textarea>
+      </div>
+      <div class="field">
+        <label for="listenerInput">Who's listening</label>
+        <input type="text" id="listenerInput" placeholder="e.g. my team lead, the ops weekly, a tradelane manager">
+      </div>
+      <div class="field">
+        <label for="wantInput">What you want from them <small>— a decision, an action, an answer</small></label>
+        <input type="text" id="wantInput" placeholder="e.g. decide A or B · approve the reroute · tell me what's missing">
+      </div>
+      <button class="btn btn-primary btn-big" id="btnStart">Get ready to speak</button>
+      <p class="hint center"><button class="linkbtn" id="btnGenerate">Nothing real today? Give me a situation</button></p>
+    </div>
+
+    <div id="statsBox" hidden>
+      <h2 class="section-title">Point-first rate</h2>
+      <div class="stats">
+        <div class="stat"><b id="statPractice">–</b><span>Practice<br><small>same case, first try</small></span></div>
+        <div class="stat"><b id="statTransfer">–</b><span>Transfer<br><small>unseen variants</small></span></div>
+        <div class="stat"><b id="statField">–</b><span>Field<br><small>no "so what do you need?"</small></span></div>
+      </div>
+      <p class="hint">Practice going up alone means you're getting good at editing this case. Transfer and field must move too.</p>
     </div>
 
     <h2 class="section-title">History</h2>
     <div id="historyList" class="list"></div>
-    <p class="empty" id="emptyHistory" hidden>Nothing yet. Pick a mode above — one round takes about three minutes.</p>
+    <p class="empty" id="emptyHistory" hidden>Nothing yet. Fill in one real thing you have to say and speak it — about four minutes.</p>
   </section>
 
   <!-- Practice -->
   <section class="view" id="view-practice" hidden>
     <div class="practice-head">
-      <span class="pill" id="modePill"></span>
-      <span class="pill pill-soft" id="srcPill"></span>
+      <span class="pill" id="typePill"></span>
+      <span class="pill pill-soft" id="stagePill"></span>
     </div>
 
-    <!-- Real-situation input -->
-    <div class="card" id="realBox" hidden>
-      <h3>What's actually going on?</h3>
-      <p class="hint">Paste the email, or describe the situation in a few lines. Who are you about to talk to?</p>
-      <textarea id="realInput" rows="5" placeholder="e.g. Customer X emailed asking why their shipment was rerouted; I'm about to go ask my team lead what to tell them…"></textarea>
-      <div class="field">
-        <label for="audienceInput">Who's listening? <small>(optional)</small></label>
-        <input type="text" id="audienceInput" placeholder="e.g. team lead, ops weekly, a tradelane manager">
+    <div class="card brief" id="briefCard">
+      <p class="brief-line"><span class="brief-k">Situation</span><span id="briefSit"></span></p>
+      <p class="brief-line"><span class="brief-k">Listener</span><span id="briefListener"></span></p>
+      <p class="brief-line"><span class="brief-k">You want</span><span id="briefWant"></span></p>
+    </div>
+
+    <!-- Recorder (reused for every attempt) -->
+    <div class="card speak" id="speakCard" hidden>
+      <div class="card-head"><h3 id="speakTitle">Say it</h3><span class="timer" id="speakTimer"></span></div>
+      <p class="hint" id="speakHint"></p>
+      <div class="rec-row">
+        <button class="recbtn" id="btnRec" aria-label="Record">
+          <svg class="ic-mic" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>
+          <svg class="ic-stop" width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="3"/></svg>
+        </button>
+        <span class="rec-state" id="recState">Tap to record — up to 45 seconds</span>
       </div>
-      <button class="btn btn-primary" id="btnUseReal">Use this</button>
+      <details class="typed" id="typedBox">
+        <summary>Can't record? Dictate or type instead</summary>
+        <p class="hint">Use the microphone key on your keyboard and speak — don't compose. Then tap Send.</p>
+        <textarea id="typedInput" rows="4"></textarea>
+        <button class="btn btn-small" id="btnTypedSend">Send</button>
+      </details>
     </div>
 
-    <!-- Scenario -->
-    <div class="card scenario" id="scenarioBox" hidden>
-      <div class="card-head"><h3>Scenario</h3><button class="btn btn-small" id="btnRegen" hidden>Another</button></div>
-      <p id="scenarioText"></p>
-      <p class="hint" id="scenarioAudience"></p>
+    <div id="attempts"></div>
+
+    <!-- Self-diagnosis -->
+    <div class="card" id="diagCard" hidden>
+      <h3>Before the coach says anything — what was the biggest problem?</h3>
+      <div class="diag" id="diagList"></div>
     </div>
 
-    <!-- Answer -->
-    <div class="card" id="answerBox" hidden>
-      <div class="card-head"><h3 id="answerTitle">Your line</h3><span class="head-right"><span class="timer" id="timer"></span><button class="btn btn-small" id="btnEditAnswer" hidden>Edit</button></span></div>
-      <p class="hint" id="answerHint"></p>
-      <textarea id="answerInput" rows="4"></textarea>
-      <button class="btn btn-primary btn-big" id="btnGrade">Grade it</button>
+    <!-- Pattern -->
+    <div class="card pattern" id="patternCard" hidden>
+      <h3 id="patternTitle"></h3>
+      <div class="pattern-steps" id="patternSteps"></div>
+      <p class="hint" id="patternHint"></p>
+      <button class="btn btn-primary btn-big" id="btnSpeakAgain">Say it again with this shape</button>
     </div>
 
-    <!-- Feedback -->
-    <div id="feedbackBox" hidden>
+    <!-- After final -->
+    <div id="afterFinal" hidden>
       <div class="card">
-        <div class="card-head"><h3>Score</h3><span class="score" id="scoreTotal"></span></div>
-        <div id="criteria" class="criteria"></div>
-      </div>
-      <div class="card">
-        <h3 id="modelTitle">A stronger version</h3>
-        <blockquote class="model-line" id="modelLine"></blockquote>
-        <p class="hint" id="modelWhy"></p>
-        <details class="take">
-          <summary>Your take on this version</summary>
-          <p class="hint">Too stiff? Wrong for a live room? Missing something you'd never leave out? Say so — the coach answers and, if you're right, revises the line.</p>
-          <textarea id="takeInput" rows="3" placeholder="e.g. This sounds robotic. I'm opening a meeting with people I know — I'd start warmer."></textarea>
-          <button class="btn btn-small" id="btnTake">Ask</button>
-          <div id="takeOut" hidden>
-            <p class="take-reply" id="takeReply"></p>
-            <blockquote class="model-line" id="takeLine" hidden></blockquote>
-          </div>
-        </details>
-      </div>
-      <div class="card" id="rewriteBox">
-        <h3>Now say it again</h3>
-        <p class="hint">Don't copy the model line — rewrite yours with the feedback in mind.</p>
-        <textarea id="rewriteInput" rows="4"></textarea>
-        <button class="btn btn-primary btn-big" id="btnRegrade">Grade the rewrite</button>
-      </div>
-      <div class="card" id="regradeBox" hidden>
-        <div class="card-head"><h3>Rewrite score</h3><span class="score" id="scoreTotal2"></span></div>
-        <div id="criteria2" class="criteria"></div>
-        <p class="delta" id="delta"></p>
+        <h3>Optional</h3>
+        <div class="btnrow">
+          <button class="btn" id="btnReveal">Reveal a model line</button>
+          <button class="btn" id="btnExtend">Extend: 2 variants + a follow-up</button>
+        </div>
+        <div id="revealOut" hidden>
+          <blockquote class="model-line" id="modelLine"></blockquote>
+          <p class="hint" id="modelWhy"></p>
+          <details class="take">
+            <summary>Your take on this version</summary>
+            <p class="hint">Too stiff? Wrong for a live room? Say so — the coach answers and, if you're right, revises the line.</p>
+            <textarea id="takeInput" rows="3" placeholder="e.g. This sounds robotic. I'm opening a meeting with people I know — I'd start warmer."></textarea>
+            <button class="btn btn-small" id="btnTake">Ask</button>
+            <div id="takeOut" hidden>
+              <p class="take-reply" id="takeReply"></p>
+              <blockquote class="model-line" id="takeLine" hidden></blockquote>
+            </div>
+          </details>
+        </div>
       </div>
       <div class="btnrow">
-        <button class="btn btn-primary" id="btnDone">Done for today</button>
-        <button class="btn" id="btnAnother">One more</button>
+        <button class="btn btn-primary" id="btnDone">Done — remind me in 2 days</button>
       </div>
     </div>
   </section>
@@ -138,6 +160,16 @@
   <!-- Detail (history entry) -->
   <section class="view" id="view-detail" hidden>
     <div id="detailBody"></div>
+    <div class="card" id="fieldCard" hidden>
+      <h3>How did it go for real?</h3>
+      <p class="hint">Fill this in after the actual conversation or meeting. This is the number that matters.</p>
+      <div class="field-row"><label>Did someone ask "so what do you need?"</label>
+        <div class="seg" id="reaskSeg"><button data-v="no">No</button><button data-v="yes">Yes</button></div></div>
+      <div class="field-row"><label>Was the decision / next step clear?</label>
+        <div class="seg" id="clearSeg"><button data-v="yes">Yes</button><button data-v="no">No</button></div></div>
+      <div class="field"><label for="fieldNote">Note <small>(optional)</small></label><input type="text" id="fieldNote" placeholder="e.g. team lead answered in one go"></div>
+      <button class="btn btn-primary" id="btnSaveField">Save</button>
+    </div>
     <div class="btnrow danger-row">
       <button class="btn btn-danger" id="btnDeleteEntry">Delete this entry</button>
     </div>
@@ -156,7 +188,7 @@
         </button>
       </div>
       <label class="check"><input type="checkbox" id="rememberKey" checked> Remember key on this device</label>
-      <p class="hint">Same key as MeetMemo works. Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. The key is sent only to Google from this browser and stored only on this device.</p>
+      <p class="hint">Same key as MeetMemo works. Get one at <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener">aistudio.google.com/apikey</a>. Your voice is sent to Google only when you tap Send/Stop, and is not stored anywhere — only the transcript stays on this device.</p>
       <button class="btn btn-small btn-danger" id="btnForgetKey">Remove key from this device</button>
     </div>
     <div class="field">
@@ -165,7 +197,7 @@
         <select id="modelSel"></select>
         <button class="btn btn-small" id="btnLoadModels">Load list</button>
       </div>
-      <p class="hint">Load list picks the newest stable Flash model for you the first time; change it here any time. Flash is enough for grading; try a Pro model if the feedback feels shallow.</p>
+      <p class="hint">Load list picks the newest stable Flash model for you the first time; change it here any time. Flash is enough; try a Pro model if the feedback feels shallow.</p>
     </div>
     <div class="field">
       <label>Feedback language</label>
@@ -173,11 +205,11 @@
         <button data-lang="en" class="active">English</button>
         <button data-lang="ko">한국어</button>
       </div>
-      <p class="hint">Scenarios, your answers and the model line are always in English. Only the explanations switch.</p>
+      <p class="hint">Situations, transcripts and model lines are always in English. Only the coach's notes switch.</p>
     </div>
     <div class="field">
-      <label for="ctxInput">About your work <small>(optional — makes generated scenarios feel like yours)</small></label>
-      <textarea id="ctxInput" rows="3" placeholder="e.g. Operations at a logistics company near Vienna. I build small internal apps (GTAT, …) and present them to the ops team. Colleagues: …"></textarea>
+      <label for="ctxInput">About your work <small>(optional — makes generated situations feel like yours)</small></label>
+      <textarea id="ctxInput" rows="3" placeholder="e.g. Operations at a logistics company near Vienna. I build small internal apps (GTAT, …) and present them to the ops team."></textarea>
     </div>
     <button class="btn btn-primary" id="btnSaveSettings">Save</button>
 
@@ -192,14 +224,15 @@
     </div>
 
     <div class="card help">
-      <h3>What this trains</h3>
+      <h3>How a session works</h3>
       <ol>
-        <li><b>Point first</b> — the conclusion, question, or ask is in the first sentence</li>
-        <li><b>Framing</b> — the listener knows why they're hearing this before the details</li>
-        <li><b>Clear references</b> — no bare "this / it / that stuff"; names, not pointers</li>
-        <li><b>Clean sentences</b> — one planned sentence at a time, no mid-sentence restarts</li>
+        <li>Enter one real thing you have to say: situation, listener, what you want</li>
+        <li><b>Speak first</b> — 5 seconds to think, up to 45 to talk. No typing, no hints</li>
+        <li>Name the biggest problem yourself, then get the shape for this kind of message</li>
+        <li>Say it again. The coach gives one fix, not ten</li>
+        <li>Say it a last time with everything hidden. Model line only if you ask</li>
+        <li>Two days later: same shape, new situation. After the real meeting: did anyone ask "so what do you need?"</li>
       </ol>
-      <p class="hint">Grading and rewrite: one round, about three minutes. Do it before you walk over to someone.</p>
     </div>
   </section>
 

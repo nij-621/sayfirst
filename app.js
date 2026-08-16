@@ -1,10 +1,13 @@
-/* SayFirst — daily "point first" drill. Text goes to the Gemini API only when you grade; rounds are stored in this device's IndexedDB */
+/* SayFirst — speak the point first. Voice goes to the Gemini API only when you stop recording (never stored); transcripts and rounds live in this device's IndexedDB */
 'use strict';
 
 const API = 'https://generativelanguage.googleapis.com';
 const $ = id => document.getElementById(id);
 const LOCALE = 'en-GB';
 const DEFAULT_MODEL = 'gemini-2.5-flash';
+const MAX_REC_MS = 45_000;
+const READY_S = 5;
+const RECALL_H = 48;
 
 /* ---------- Settings ---------- */
 const SKEY = 'sayfirst-settings', KKEY = 'sayfirst-apikey';
@@ -23,11 +26,10 @@ const Settings = {
   },
   forgetKey() { localStorage.removeItem(KKEY); sessionStorage.removeItem(KKEY); },
 };
-let settings = Object.assign({ apiKey: '', model: DEFAULT_MODEL, lang: 'en', rememberKey: true, ctx: '', src: 'generated', modelPicked: false }, Settings.load());
-// v1 stored a Claude model/key — reset to Gemini defaults
+let settings = Object.assign({ apiKey: '', model: DEFAULT_MODEL, lang: 'en', rememberKey: true, ctx: '', type: 'ask', modelPicked: false }, Settings.load());
 if (!/^gemini/.test(settings.model)) { settings.model = DEFAULT_MODEL; settings.modelPicked = false; }
 if (settings.apiKey && !/^AIza/.test(settings.apiKey)) settings.apiKey = '';
-// MeetMemo lives on the same origin (nij-621.github.io) — reuse its Gemini key if we have none
+// MeetMemo lives on the same origin — reuse its Gemini key if we have none
 if (!settings.apiKey) { const k = localStorage.getItem('protokoll-apikey'); if (k && /^AIza/.test(k)) { settings.apiKey = k; Settings.save(settings); } }
 
 /* ---------- Storage (IndexedDB) ---------- */
@@ -35,8 +37,8 @@ const DB = {
   db: null,
   open() {
     return new Promise((res, rej) => {
-      const r = indexedDB.open('sayfirst', 1);
-      r.onupgradeneeded = e => e.target.result.createObjectStore('rounds', { keyPath: 'id' });
+      const r = indexedDB.open('sayfirst', 2);
+      r.onupgradeneeded = e => { const db = e.target.result; if (!db.objectStoreNames.contains('rounds')) db.createObjectStore('rounds', { keyPath: 'id' }); };
       r.onsuccess = () => { DB.db = r.result; res(); };
       r.onerror = () => rej(r.error);
     });
@@ -49,7 +51,7 @@ const DB = {
   del(id) { return DB.req(DB.store('readwrite').delete(id)); },
 };
 
-/* ---------- Gemini API (same pattern as MeetMemo) ---------- */
+/* ---------- Gemini API ---------- */
 const authHeaders = extra => ({ 'x-goog-api-key': settings.apiKey, ...extra });
 
 async function apiError(r) {
@@ -74,11 +76,11 @@ function geminiSchema(s) {
   return out;
 }
 
-// One structured-output call. Returns the parsed JSON object.
-async function askJSON(system, user, schema, maxTokens = 8192) {
+// One structured-output call. `parts` = user parts (text and/or inline audio). Returns parsed JSON.
+async function askJSON(system, parts, schema, maxTokens = 8192) {
   const body = {
     system_instruction: { parts: [{ text: system }] },
-    contents: [{ role: 'user', parts: [{ text: user }] }],
+    contents: [{ role: 'user', parts }],
     generationConfig: { responseMimeType: 'application/json', responseSchema: geminiSchema(schema), maxOutputTokens: maxTokens },
   };
   const r = await fetch(`${API}/v1beta/models/${settings.model}:generateContent`, {
@@ -92,6 +94,7 @@ async function askJSON(system, user, schema, maxTokens = 8192) {
   const text = (c?.content?.parts || []).map(p => p.text || '').join('');
   try { return JSON.parse(text); } catch { throw new Error('Could not read the response. Try again.'); }
 }
+const T = text => ({ text });
 
 async function fetchModels() {
   const r = await fetch(`${API}/v1beta/models?pageSize=200`, { headers: authHeaders() });
@@ -103,7 +106,6 @@ async function fetchModels() {
     .filter(n => n.startsWith('gemini') && !/embedding|image|tts|live|audio-dialog|robotics|computer-use/.test(n))
     .sort();
 }
-// Newest stable Flash (gemini-X.Y-flash, no preview/lite/exp)
 function pickDefaultModel(models) {
   const stable = models
     .map(n => ({ n, m: n.match(/^gemini-(\d+)(?:\.(\d+))?-flash$/) }))
@@ -112,127 +114,160 @@ function pickDefaultModel(models) {
   return stable[0]?.n || models.find(n => /flash/.test(n)) || settings.model;
 }
 
-/* ---------- Prompts ---------- */
-const MODES = {
-  oneliner: {
-    label: 'One-liner',
-    answerTitle: 'Your opening line',
-    hint: 'One or two sentences, as you would say them out loud. Lead with the question or the ask. Aim for under 30 seconds.',
-    shape: 'ONE or TWO spoken sentences: (1) the question or ask, stated first; (2) at most one sentence of context that tells the listener why they are hearing this. Nothing else.',
-    frame: 'The user is about to walk over to a colleague or team lead (or ping them) about a work situation. Their habit is to start with a chronological story ("So there was this email from X, and they said...") and never state what they actually want. The drill: put the question or ask in the first sentence.',
+/* ---------- Message types & patterns ---------- */
+const TYPES = {
+  ask: {
+    label: 'Ask', hint: 'You need something from someone — a decision, an approval, help.',
+    point: 'the request itself (what you want them to do or decide)',
+    steps: ['Request — what you want, in one sentence', 'Reason — the one fact that makes it necessary', 'Next step — what happens once they say yes'],
+    frame: 'The user is about to walk over to (or ping) a colleague or team lead to ask for a decision, approval, or help. Their habit: a chronological story first, the actual request last or never.',
+  },
+  qa: {
+    label: 'Q&A', hint: 'Someone asked you a question — in a meeting, in the corridor.',
+    point: 'the direct answer (or the condition under which the answer holds)',
+    steps: ['Answer — yes / no / it depends on X, first', 'Reason & risk — why, and what could go wrong', 'Next step — what you will do or need'],
+    frame: 'The user was asked a question at work and has to answer on the spot. Their habit: explaining background before giving the answer.',
+  },
+  update: {
+    label: 'Update', hint: 'A status, a result, a heads-up.',
+    point: 'the current conclusion (where things stand, in one line)',
+    steps: ['Conclusion — where it stands, one line', 'Impact — what it means for the listener', 'Ask / next step — what you need or will do'],
+    frame: 'The user is giving a status update or reporting a result. Their habit: narrating what happened in order, so the listener has to work out the state themselves.',
   },
   pitch: {
-    label: '3-sentence pitch',
-    answerTitle: 'Your three sentences',
-    hint: 'Exactly three sentences you could say with the screen off: (1) who has what problem, (2) what this does about it, (3) what you want from the people in the room.',
-    shape: 'THREE spoken parts, each one short sentence (an optional one-sentence opener that orients the room — e.g. acknowledging that some know the tool and some do not — is allowed before them): (1) who has what problem today, (2) what this thing does about it — the value, not the clicks, (3) what you want from the audience (decision, feedback, adoption, time).',
-    frame: 'The user is about to demo or present something they built (an internal app, a process, a tool) at work. Their habit is to start narrating the screen ("so here you click...") without ever saying what problem it solves, so a colleague ends up summarising the value for them. The drill: three sentences that frame the demo before any screen is shown.',
+    label: 'Pitch', hint: 'You are about to demo or present something you built.',
+    point: 'the value (what problem this removes) — before any screen or feature',
+    steps: ['Problem — who has what problem today', 'Value — what this does about it, not the clicks', 'What you want from the room — decision, feedback, adoption'],
+    frame: 'The user is about to demo or present something they built. Their habit: narrating the screen without saying what problem it solves, so a colleague ends up summarising the value for them.',
   },
 };
 
-const CRITERIA = [
-  { key: 'point_first', en: 'Point first', ko: '결론 먼저' },
-  { key: 'framing', en: 'Framing', ko: '프레이밍' },
-  { key: 'references', en: 'Clear references', ko: '지시어 명확' },
-  { key: 'sentences', en: 'Clean sentences', ko: '문장 계획' },
+const ISSUES = [
+  { key: 'late_point', en: 'The point came late (or never)', ko: '결론·요청이 늦게 나왔다 (또는 안 나왔다)' },
+  { key: 'no_framing', en: 'No framing — listener didn\'t know why they were hearing it', ko: '프레이밍 없음 — 왜 듣는지 몰랐을 것' },
+  { key: 'vague_reference', en: 'Vague words — "this", "it", "that thing"', ko: '지시어가 모호 — this, it, that thing' },
+  { key: 'restarts', en: 'Restarts and run-ons — sentences rebuilt mid-way', ko: '문장 재시작·늘어짐' },
+  { key: 'wrong_for_listener', en: 'Right content, wrong for this listener', ko: '내용은 맞는데 이 청자에게 안 맞음' },
+  { key: 'none', en: 'Honestly, it was fine', ko: '솔직히 괜찮았다' },
 ];
+const issueLabel = k => { const i = ISSUES.find(x => x.key === k); return i ? (settings.lang === 'ko' ? i.ko : i.en) : k; };
+function langName(l) { return l === 'ko' ? 'Korean (한국어)' : 'English'; }
+const STAGE_LABEL = { first: 'First try', second: 'With the shape', final: 'Final — no hints', near: 'Variant · near', far: 'Variant · far', followup: 'Follow-up question', recall: 'Recall · 2 days later' };
 
-const SCENARIO_SCHEMA = {
+/* ---------- Schemas & prompts ---------- */
+const ANALYZE_SCHEMA = {
   type: 'object',
   properties: {
-    scenario: { type: 'string', description: 'The situation, 2–4 sentences, second person, concrete names/numbers/dates.' },
-    audience: { type: 'string', description: 'Who the user is about to talk to and what that person cares about, one sentence.' },
+    transcript: { type: 'string', description: 'Verbatim transcript in English, including fillers (um, uh, so, like, you know) and restarts. If the input is text, copy it as is.' },
+    point_sentence: { type: 'integer', description: '1-based index of the sentence where the point first appears. 0 if it never appears.' },
+    words_before_point: { type: 'integer', description: 'Number of words spoken before the point sentence begins. If the point never appears, the total word count.' },
+    fillers: { type: 'integer', description: 'Count of filler words/sounds.' },
+    restarts: { type: 'integer', description: 'Count of sentences abandoned and restarted mid-way, or run-ons chaining 3+ ideas.' },
+    biggest_issue: { type: 'string', enum: ['late_point', 'no_framing', 'vague_reference', 'restarts', 'wrong_for_listener', 'none'] },
+    note: { type: 'string', description: 'The coach\'s note for this stage — see instructions for length and content.' },
   },
-  required: ['scenario', 'audience'],
+  required: ['transcript', 'point_sentence', 'words_before_point', 'fillers', 'restarts', 'biggest_issue', 'note'],
   additionalProperties: false,
 };
 
-const GRADE_SCHEMA = {
+function analyzePrompt(round, stage, extra = {}) {
+  const t = TYPES[round.type];
+  const noteRule = {
+    first: 'For this FIRST attempt the user has not yet self-diagnosed: keep the note to ONE short factual sentence about where the point appeared. No advice yet.',
+    second: `The user self-diagnosed their first attempt as: "${issueLabel(extra.selfDiag)}". Say in one sentence whether that was the biggest problem or not (be honest). Then give exactly ONE fix — the single change that would most improve THIS attempt — in one or two sentences, quoting their words. Nothing else.`,
+    final: 'This is the FINAL attempt with all hints hidden. One sentence: did the point come first, and what is the one thing to carry into the real conversation.',
+    near: 'This is a NEAR variant of the real case. One sentence: did they use the same shape, and where did it slip.',
+    far: 'This is a FAR variant (different domain, same shape). One sentence: did the shape transfer, and where did it slip.',
+    followup: 'This is an answer to an UNEXPECTED follow-up question. One sentence: was the direct answer first, and where did it slip.',
+    recall: 'This is a RECALL two days later in a new situation. One sentence: did the shape survive, and where did it slip.',
+  }[stage];
+  const previous = round.attempts.length ? `\nEarlier attempts in this session (for context, do not re-grade them):\n${round.attempts.map(a => `- ${a.stage}: "${a.transcript}"`).join('\n')}` : '';
+  return `You are a blunt, precise speaking coach for a non-native English speaker in an Operations role, whose colleagues are all non-native speakers too. Their diagnosed habit (from real transcripts): the point arrives after 30–40 seconds of story; no framing; vague pointers ("this", "it", "that stuff"); sentences restarted mid-way. Colleagues have to re-summarise what they meant.
+
+${t.frame}
+For a "${t.label}" message, "the point" means: ${t.point}.
+The shape they are learning: ${t.steps.join(' → ')}.
+
+Situation: ${extra.situation || round.situation}
+Listener: ${extra.listener || round.listener || 'not specified'}
+What they want: ${extra.want || round.want || 'not specified'}${extra.question ? `\nThe follow-up question they were asked: ${extra.question}` : ''}${previous}
+
+Task: transcribe the attempt verbatim (if audio; keep fillers and restarts — do NOT clean it up), split into sentences, find the first sentence where the point appears, count words before it, count fillers, count restarts, and name the biggest issue.
+Note rule: ${noteRule}
+Write the note in ${langName(settings.lang)}; the transcript stays in English. Output JSON only.`;
+}
+
+const SITUATION_SCHEMA = {
   type: 'object',
   properties: {
-    criteria: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          key: { type: 'string', enum: ['point_first', 'framing', 'references', 'sentences'] },
-          score: { type: 'integer', description: 'Exactly 0, 1 or 2.', enum: [0, 1, 2] },
-          note: { type: 'string', description: 'One or two sentences. Quote the user\'s own words. Say what to change, not just what is wrong.' },
-        },
-        required: ['key', 'score', 'note'],
-        additionalProperties: false,
-      },
-    },
-    model_line: { type: 'string', description: 'A rewrite of the user\'s answer with the same content that would score 8/8. Natural spoken English, first person. Respect the sentence count for the mode.' },
-    why: { type: 'string', description: 'One sentence: the single biggest structural change between the user\'s version and the model line.' },
+    situation: { type: 'string', description: '2–4 sentences, second person, concrete names/numbers/dates, with a real judgment call inside.' },
+    listener: { type: 'string', description: 'Who is listening and what they care about, one line.' },
+    want: { type: 'string', description: 'What the user needs from the listener — a decision, an action, an answer. One line.' },
   },
-  required: ['criteria', 'model_line', 'why'],
+  required: ['situation', 'listener', 'want'],
   additionalProperties: false,
 };
+function situationPrompt(type, recent) {
+  const t = TYPES[type];
+  return {
+    system: `You write short, realistic workplace situations for a speaking drill. ${t.frame}
+${settings.ctx ? `About the user's work (make it feel like theirs — real-sounding systems, numbers, roles; do not invent colleague names): ${settings.ctx}` : ''}
+Rules: second person. Concrete. Slightly messy — a real judgment call inside. English only.`,
+    user: `Write one new "${t.label}" situation.${recent.length ? `\nDo not reuse these recent themes:\n- ${recent.join('\n- ')}` : ''}`,
+  };
+}
+
+const VARIANTS_SCHEMA = {
+  type: 'object',
+  properties: {
+    near: SITUATION_SCHEMA,
+    far: SITUATION_SCHEMA,
+    followup: { type: 'string', description: 'One unexpected but realistic follow-up question a listener might fire back after the user\'s message about the ORIGINAL situation.' },
+  },
+  required: ['near', 'far', 'followup'],
+  additionalProperties: false,
+};
+function variantsPrompt(round) {
+  const t = TYPES[round.type];
+  return {
+    system: `You design transfer exercises for a speaking drill. The user just practised a "${t.label}" message with the shape: ${t.steps.join(' → ')}.
+Make: (1) a NEAR variant — same workplace, same kind of listener, different facts, so the same shape applies; (2) a FAR variant — a different domain or a private-life setting where the same shape still applies (a landlord, a school, a doctor's office, a friend); (3) one unexpected follow-up question about the ORIGINAL situation.
+Second person, concrete, English only. Do not invent colleague names.`,
+    user: `Original situation: ${round.situation}\nListener: ${round.listener}\nWhat they want: ${round.want}`,
+  };
+}
+
+const MODEL_SCHEMA = {
+  type: 'object',
+  properties: {
+    model_line: { type: 'string', description: 'What the user could say, in their own content, following the shape. Plain words, short sentences (~15 words each), sounds like a warm clear person out loud. Not a press release.' },
+    why: { type: 'string', description: 'One sentence: the single biggest structural difference from the user\'s final attempt.' },
+  },
+  required: ['model_line', 'why'],
+  additionalProperties: false,
+};
+function modelPrompt(round) {
+  const t = TYPES[round.type];
+  const last = round.attempts.filter(a => ['first', 'second', 'final'].includes(a.stage)).slice(-1)[0];
+  return {
+    system: `You are the same speaking coach. Everyone in the user's workplace is a non-native English speaker: plain words, short sentences, no idioms. A one-sentence human opener that orients the room counts as framing, not story. Shape: ${t.steps.join(' → ')}. Write "why" in ${langName(settings.lang)}; the model line in English. JSON only.`,
+    user: `Situation: ${round.situation}\nListener: ${round.listener}\nWhat they want: ${round.want}\n\nUser's latest attempt: ${last?.transcript || ''}`,
+  };
+}
 
 const TAKE_SCHEMA = {
   type: 'object',
   properties: {
-    reply: { type: 'string', description: 'Two to four sentences answering the user directly: are they right, partly right, or wrong — and why.' },
-    revised_line: { type: 'string', description: 'If the user has a point, a revised model line that keeps the structure but takes their concern on board. Empty string if no change is warranted.' },
+    reply: { type: 'string', description: 'Two to four sentences answering the user directly: right, partly right, or wrong — and why.' },
+    revised_line: { type: 'string', description: 'If the user has a point, a revised model line. Empty string if no change is warranted.' },
   },
   required: ['reply', 'revised_line'],
   additionalProperties: false,
 };
-
-function takePrompt(mode, scenario, audience, answer, modelLine, take) {
-  const m = MODES[mode];
+function takePrompt(round, modelLine, take) {
   return {
-    system: `You are the same speaking coach who just graded a "${m.label}" drill and offered a model line. The user now pushes back or asks about that model line. Answer honestly: if they are right (e.g. the line is too stiff for a live room, misses a human opener, drops something they need), say so and revise. If they are wrong (e.g. they want to bring the story back before the point), say so plainly and keep the line. Never flatter. Keep the four criteria: point first, framing, clear references, clean sentences.
-
-Everyone in the user's workplace is a non-native English speaker: any revised line uses plain words and short sentences (~15 words each), and sounds like something a warm, clear person would say out loud.
-
-Write the reply in ${langName(settings.lang)}; the revised_line stays in English. Output JSON only.`,
-    user: `Scenario: ${scenario}
-Listener: ${audience || 'not specified'}
-User's answer: ${answer}
-Model line you gave: ${modelLine}
-
-User's take: ${take}`,
-  };
-}
-
-function langName(l) { return l === 'ko' ? 'Korean (한국어)' : 'English'; }
-
-function scenarioPrompt(mode, recent) {
-  const m = MODES[mode];
-  return {
-    system: `You write short, realistic workplace scenarios for a speaking drill. ${m.frame}
-${settings.ctx ? `\nAbout the user's work (use it to make scenarios feel like theirs — real-sounding names, systems, numbers): ${settings.ctx}` : ''}
-Rules: second person ("You just noticed…"). Concrete: a name, a number, a date, a system. Slightly messy — there is a real judgment call inside, so a good answer needs an actual question or ask, not a status report. English only. No preamble.`,
-    user: `Write one new scenario for the "${m.label}" drill.${recent.length ? `\nDo not reuse these recent themes:\n- ${recent.join('\n- ')}` : ''}`,
-  };
-}
-
-function gradePrompt(mode, scenario, audience, answer, isRewrite, previous) {
-  const m = MODES[mode];
-  return {
-    system: `You are a blunt, precise speaking coach for a non-native English speaker in an Operations role. Their diagnosed pattern (from real meeting transcripts): the conclusion arrives after 30–40 seconds of narrative; no framing before details; vague pointers ("this", "it", "all those stuff"); sentences started and then rebuilt mid-way. Colleagues have to re-summarise what they meant.
-
-Grade the answer for the "${m.label}" drill. Expected shape: ${m.shape}
-
-Score each criterion 0–2 (2 = fully there, 1 = partly, 0 = missing):
-- point_first: is the question / ask / conclusion in the FIRST sentence, before any story?
-- framing: does the listener know why they're hearing this and what kind of input is wanted, without needing to ask "so what do you need from me?"
-- references: every "this / it / that / the thing" has an explicit referent nearby; names and nouns, not pointers.
-- sentences: each sentence is one planned thought — no restarts, no run-ons chaining three ideas with "and… so… but".
-
-Be strict — a 2 means a native colleague would need zero clarifying questions. Notes must quote the user's words and say what to change. Ignore minor grammar unless it hides the meaning; this is about structure. Also penalise answers that ignore the expected shape (e.g. five sentences for the one-liner, or a screen walkthrough for the pitch).
-
-This is SPOKEN language to real colleagues, not an email subject line. A short human opener that orients the room ("I know some of you know this app and some don't, so I'll start from the beginning") is FRAMING, not narrative — do not penalise it, as long as the point follows right after. Penalise only chronological story-telling that delays the point. The model_line should sound like something a warm, clear person would actually say out loud — not a press release.
-
-Everyone in the user's workplace is a non-native English speaker (English is the shared language, nobody's mother tongue). So the model_line must use plain, common words and short sentences — roughly 15 words per sentence, no idioms, no clever phrasing. If it sounds like a native-speaker's polished line, it is wrong. Also give a 0 or 1 on "sentences" when the user's sentence would be hard for a non-native listener to follow.
-
-model_line and any quoted English stay in English. Write the notes and "why" in ${langName(settings.lang)}. Output JSON only.`,
-    user: `Scenario: ${scenario}
-Listener: ${audience || 'not specified'}
-${isRewrite ? `The user's first attempt (already graded, scores ${previous}): ${isRewrite}\n\nTheir REWRITE to grade now:` : 'Answer to grade:'}
-${answer}`,
+    system: `You are the same speaking coach who offered a model line. The user pushes back. If they are right (too stiff for a live room, misses a human opener, drops something they need), say so and revise. If they are wrong (they want the story back before the point), say so plainly and keep the line. Never flatter. Plain words, short sentences. Reply in ${langName(settings.lang)}; revised_line in English. JSON only.`,
+    user: `Situation: ${round.situation}\nListener: ${round.listener}\nModel line: ${modelLine}\n\nUser's take: ${take}`,
   };
 }
 
@@ -251,154 +286,15 @@ function swapLabel(btn, text) {
   btn.classList.add('swapping');
   setTimeout(() => { btn.textContent = text; btn.classList.remove('swapping'); }, 120);
 }
-function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+function esc(s) { return String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 function fmtDate(ts) { return new Date(ts).toLocaleDateString(LOCALE, { day: 'numeric', month: 'short' }); }
 function dayKey(ts) { const d = new Date(ts); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
-function total(grade) { return grade ? grade.criteria.reduce((a, c) => a + c.score, 0) : null; }
-function critName(key) { const c = CRITERIA.find(x => x.key === key); return c ? (settings.lang === 'ko' ? c.ko : c.en) : key; }
+const hit = a => a && a.metrics && a.metrics.pointSentence === 1;
 
 const views = ['home', 'practice', 'detail', 'settings'];
-function show(view) {
-  views.forEach(v => $(`view-${v}`).hidden = v !== view);
-  window.scrollTo(0, 0);
-}
+function show(view) { views.forEach(v => $(`view-${v}`).hidden = v !== view); window.scrollTo(0, 0); }
 
-/* ---------- Streak / home ---------- */
-function computeStreak(rounds) {
-  const days = new Set(rounds.map(r => dayKey(r.createdAt)));
-  let streak = 0;
-  const d = new Date();
-  // A streak is alive if there is a round today or yesterday
-  if (!days.has(dayKey(d))) d.setDate(d.getDate() - 1);
-  while (days.has(dayKey(d))) { streak++; d.setDate(d.getDate() - 1); }
-  return streak;
-}
-
-async function renderHome() {
-  const rounds = (await DB.all()).sort((a, b) => b.createdAt - a.createdAt);
-  const streak = computeStreak(rounds);
-  const today = rounds.filter(r => dayKey(r.createdAt) === dayKey(Date.now()));
-  $('streakBadge').innerHTML = streak ? `<b>${streak}</b> day${streak === 1 ? '' : 's'}` : '';
-  $('heroKicker').textContent = new Date().toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long' });
-  $('heroTitle').textContent = today.length ? 'Again. Point first.' : 'Say the point first.';
-  $('heroSub').textContent = today.length
-    ? `${today.length} round${today.length === 1 ? '' : 's'} today${streak > 1 ? ` · ${streak}-day streak` : ''}. One more won't hurt.`
-    : (streak ? `${streak}-day streak on the line. Three minutes.` : 'One scenario, one line, one rewrite. About three minutes.');
-
-  document.querySelectorAll('#srcSeg button').forEach(b => b.classList.toggle('active', b.dataset.src === settings.src));
-
-  const list = $('historyList');
-  list.innerHTML = '';
-  $('emptyHistory').hidden = rounds.length > 0;
-  rounds.slice(0, 40).forEach((r, i) => {
-    const btn = document.createElement('button');
-    btn.className = 'hist-item';
-    btn.style.setProperty('--i', Math.min(i, 8));
-    const t1 = total(r.grade), t2 = total(r.grade2);
-    btn.innerHTML = `<span class="h-title">${esc(r.scenario)}</span>
-      <span class="h-score">${t2 != null ? `${t1}→${t2}` : t1}<small>/8</small></span>
-      <span class="h-meta">${fmtDate(r.createdAt)} · ${MODES[r.mode].label}${r.src === 'real' ? ' · real' : ''}</span>`;
-    btn.onclick = () => openDetail(r.id);
-    list.appendChild(btn);
-  });
-  show('home');
-}
-
-/* ---------- Practice ---------- */
-let round = null;   // current in-progress round
-let timerId = null, timerStart = 0;
-
-function startTimer() {
-  stopTimer();
-  timerStart = Date.now();
-  const el = $('timer');
-  const tick = () => {
-    const s = Math.floor((Date.now() - timerStart) / 1000);
-    el.textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-    el.classList.toggle('over', s >= 60);
-  };
-  tick();
-  timerId = setInterval(tick, 1000);
-}
-function stopTimer() { clearInterval(timerId); timerId = null; }
-
-async function startRound(mode) {
-  if (!settings.apiKey) { toast('Add your API key in Settings first'); renderSettings(); return; }
-  round = { id: crypto.randomUUID(), createdAt: Date.now(), mode, src: settings.src, scenario: '', audience: '', answer: '', grade: null, rewrite: '', grade2: null, take: '', takeReply: null };
-  $('takeInput').value = ''; $('takeOut').hidden = true; $('takeLine').hidden = true;
-  const m = MODES[mode];
-  $('modePill').textContent = m.label;
-  $('srcPill').textContent = settings.src === 'real' ? 'real situation' : 'generated';
-  $('answerTitle').textContent = m.answerTitle;
-  $('answerHint').textContent = m.hint;
-  $('answerInput').value = ''; setAnswerLocked(false);
-  $('rewriteInput').value = '';
-  $('feedbackBox').hidden = true;
-  $('regradeBox').hidden = true;
-  $('answerBox').hidden = true;
-  $('scenarioBox').hidden = true;
-  $('realBox').hidden = settings.src !== 'real';
-  $('btnRegen').hidden = settings.src === 'real';
-  show('practice');
-  if (settings.src === 'real') { $('realInput').value = ''; $('audienceInput').value = ''; $('realInput').focus(); }
-  else await generateScenario();
-}
-
-async function generateScenario() {
-  const box = $('scenarioBox');
-  box.hidden = false; box.classList.add('loading');
-  $('scenarioText').textContent = 'Writing a scenario…';
-  $('scenarioAudience').textContent = '';
-  $('answerBox').hidden = true;
-  try {
-    const recent = (await DB.all()).sort((a, b) => b.createdAt - a.createdAt).filter(r => r.mode === round.mode).slice(0, 8).map(r => r.scenario.slice(0, 120));
-    const p = scenarioPrompt(round.mode, recent);
-    const s = await askJSON(p.system, p.user, SCENARIO_SCHEMA, 4096);
-    round.scenario = s.scenario; round.audience = s.audience;
-    $('scenarioText').textContent = s.scenario;
-    $('scenarioAudience').textContent = s.audience;
-    box.classList.remove('loading');
-    $('answerBox').hidden = false;
-    startTimer();
-    $('answerInput').focus();
-  } catch (e) {
-    box.classList.remove('loading');
-    $('scenarioText').textContent = 'Could not get a scenario. ' + e.message;
-    toast(e.message, 5000);
-  }
-}
-
-function useReal() {
-  const text = $('realInput').value.trim();
-  if (!text) { toast('Describe the situation first'); return; }
-  round.scenario = text;
-  round.audience = $('audienceInput').value.trim();
-  $('realBox').hidden = true;
-  $('scenarioBox').hidden = false;
-  $('scenarioText').textContent = text;
-  $('scenarioAudience').textContent = round.audience ? `Listener: ${round.audience}` : '';
-  $('answerBox').hidden = false;
-  startTimer();
-  $('answerInput').focus();
-}
-
-function renderCriteria(el, grade) {
-  el.innerHTML = grade.criteria.map(c => `<div class="crit">
-    <span class="crit-mark s${c.score}">${c.score}</span>
-    <div><strong>${esc(critName(c.key))}</strong><p>${esc(c.note)}</p></div>
-  </div>`).join('');
-}
-
-// After the first grade the answer is locked; "Edit" unlocks it and turns Grade into "Grade again"
-function setAnswerLocked(locked) {
-  $('answerInput').readOnly = locked;
-  $('btnGrade').hidden = locked;
-  $('btnEditAnswer').hidden = !locked;
-  $('btnGrade').textContent = round?.grade ? 'Grade again' : 'Grade it';
-  if (!locked) $('answerInput').focus();
-}
-
-/* Copy / clear tools attached under text fields and model lines */
+/* Copy / clear tools */
 const IC_COPY = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>';
 const IC_CLEAR = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
 function attachTools(id, { clear = true } = {}) {
@@ -406,7 +302,7 @@ function attachTools(id, { clear = true } = {}) {
   const bar = document.createElement('div');
   bar.className = 'tools';
   const copy = document.createElement('button');
-  copy.type = 'button'; copy.className = 'toolbtn'; copy.innerHTML = IC_COPY + '<span>Copy</span>'; copy.setAttribute('aria-label', 'Copy');
+  copy.type = 'button'; copy.className = 'toolbtn'; copy.innerHTML = IC_COPY + '<span>Copy</span>';
   copy.onclick = async () => {
     const text = ('value' in el ? el.value : el.textContent).trim();
     if (!text) { toast('Nothing to copy'); return; }
@@ -415,89 +311,433 @@ function attachTools(id, { clear = true } = {}) {
   bar.appendChild(copy);
   if (clear) {
     const clr = document.createElement('button');
-    clr.type = 'button'; clr.className = 'toolbtn'; clr.innerHTML = IC_CLEAR + '<span>Clear</span>'; clr.setAttribute('aria-label', 'Clear');
+    clr.type = 'button'; clr.className = 'toolbtn'; clr.innerHTML = IC_CLEAR + '<span>Clear</span>';
     clr.onclick = () => { if (el.readOnly) return; el.value = ''; el.focus(); };
     bar.appendChild(clr);
   }
   el.insertAdjacentElement('afterend', bar);
 }
 
-async function grade(isRewrite) {
-  const input = isRewrite ? $('rewriteInput') : $('answerInput');
-  const btn = isRewrite ? $('btnRegrade') : $('btnGrade');
-  const answer = input.value.trim();
-  if (!answer) { toast('Write something first'); return; }
-  if (btn.disabled) return;
-  btn.disabled = true; const old = btn.textContent; swapLabel(btn, 'Grading…');
-  try {
-    const p = gradePrompt(round.mode, round.scenario, round.audience, answer, isRewrite ? round.answer : null, isRewrite ? `${total(round.grade)}/8` : null);
-    const raw = await askJSON(p.system, p.user, GRADE_SCHEMA);
-    // Normalise: one entry per criterion, in fixed order, score clamped to 0–2
-    const g = {
-      model_line: String(raw.model_line || ''), why: String(raw.why || ''),
-      criteria: CRITERIA.map(c => {
-        const f = (raw.criteria || []).find(x => x.key === c.key) || {};
-        return { key: c.key, score: Math.max(0, Math.min(2, Math.round(+f.score || 0))), note: String(f.note || '') };
-      }),
-    };
-    if (isRewrite) {
-      round.rewrite = answer; round.grade2 = g;
-      $('scoreTotal2').innerHTML = `${total(g)}<small>/8</small>`;
-      renderCriteria($('criteria2'), g);
-      const d = total(g) - total(round.grade);
-      const el = $('delta');
-      el.textContent = d > 0 ? `+${d} — that's the shape.` : d === 0 ? 'Same score. Read the model line once more and go again tomorrow.' : `${d} — the rewrite drifted. Compare with the model line.`;
-      el.className = 'delta ' + (d > 0 ? 'up' : d < 0 ? 'down' : '');
-      $('regradeBox').hidden = false;
-      $('regradeBox').scrollIntoView({ behavior: 'smooth', block: 'start' });
+/* ---------- Home ---------- */
+function computeStreak(rounds) {
+  const days = new Set(rounds.map(r => dayKey(r.createdAt)));
+  let streak = 0;
+  const d = new Date();
+  if (!days.has(dayKey(d))) d.setDate(d.getDate() - 1);
+  while (days.has(dayKey(d))) { streak++; d.setDate(d.getDate() - 1); }
+  return streak;
+}
+function rate(list, pred) { const n = list.length; return n ? `${Math.round(100 * list.filter(pred).length / n)}%` : '–'; }
+
+async function renderHome() {
+  const rounds = (await DB.all()).sort((a, b) => b.createdAt - a.createdAt);
+  const v2 = rounds.filter(r => r.v === 2);
+  const streak = computeStreak(rounds);
+  const today = rounds.filter(r => dayKey(r.createdAt) === dayKey(Date.now()));
+  $('streakBadge').innerHTML = streak ? `<b>${streak}</b> day${streak === 1 ? '' : 's'}` : '';
+  $('heroKicker').textContent = new Date().toLocaleDateString(LOCALE, { weekday: 'long', day: 'numeric', month: 'long' });
+  $('heroSub').textContent = today.length
+    ? `${today.length} round${today.length === 1 ? '' : 's'} today. An email to answer, someone to ask, a status to give — one of those, out loud.`
+    : 'An email to answer, someone to ask, a status to give. Pick one, say it out loud, get one fix. About four minutes.';
+
+  // Type segment
+  document.querySelectorAll('#typeSeg button').forEach(b => b.classList.toggle('active', b.dataset.type === settings.type));
+  $('typeHint').textContent = TYPES[settings.type].hint;
+
+  // Due recalls
+  const due = v2.filter(r => r.recall && !r.recall.doneAt && r.recall.dueAt <= Date.now());
+  $('dueBox').hidden = !due.length;
+  $('dueList').innerHTML = '';
+  due.forEach(r => {
+    const b = document.createElement('button');
+    b.className = 'hist-item due';
+    b.innerHTML = `<span class="h-title">${esc(r.situation)}</span><span class="h-score">${TYPES[r.type].label}</span><span class="h-meta">practised ${fmtDate(r.createdAt)} · new situation, same shape</span>`;
+    b.onclick = () => startRecall(r);
+    $('dueList').appendChild(b);
+  });
+
+  // Stats
+  const firsts = v2.map(r => r.attempts.find(a => a.stage === 'first')).filter(Boolean);
+  const transfer = v2.flatMap(r => r.attempts.filter(a => ['near', 'far', 'followup', 'recall'].includes(a.stage)));
+  const field = v2.filter(r => r.field && r.field.reasked != null);
+  $('statsBox').hidden = !v2.length;
+  $('statPractice').textContent = rate(firsts, hit);
+  $('statTransfer').textContent = rate(transfer, hit);
+  $('statField').textContent = rate(field, r => r.field.reasked === false);
+
+  // History
+  const list = $('historyList');
+  list.innerHTML = '';
+  $('emptyHistory').hidden = rounds.length > 0;
+  rounds.slice(0, 40).forEach((r, i) => {
+    const btn = document.createElement('button');
+    btn.className = 'hist-item';
+    btn.style.setProperty('--i', Math.min(i, 8));
+    if (r.v === 2) {
+      const f = r.attempts.find(a => a.stage === 'first'), l = r.attempts.filter(a => ['second', 'final'].includes(a.stage)).slice(-1)[0];
+      const mark = a => a ? (hit(a) ? '●' : '○') : '·';
+      btn.innerHTML = `<span class="h-title">${esc(r.situation)}</span>
+        <span class="h-score">${mark(f)}${mark(l)}<small> point 1st</small></span>
+        <span class="h-meta">${fmtDate(r.createdAt)} · ${TYPES[r.type].label}${r.field?.reasked === false ? ' · field ✓' : r.field?.reasked === true ? ' · re-asked' : ''}${r.recall && !r.recall.doneAt ? ' · recall due ' + fmtDate(r.recall.dueAt) : ''}</span>`;
     } else {
-      stopTimer();
-      // (Re)grading the first attempt resets everything downstream of it
-      round.answer = answer; round.grade = g;
-      round.rewrite = ''; round.grade2 = null; round.take = ''; round.takeReply = null;
-      $('scoreTotal').innerHTML = `${total(g)}<small>/8</small>`;
-      renderCriteria($('criteria'), g);
-      $('modelLine').textContent = g.model_line;
-      $('modelWhy').textContent = g.why;
-      $('rewriteInput').value = answer;
-      $('regradeBox').hidden = true;
-      $('takeInput').value = ''; $('takeOut').hidden = true; $('takeLine').hidden = true;
-      $('feedbackBox').hidden = false;
-      setAnswerLocked(true);
-      $('feedbackBox').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const tot = g => g ? g.criteria.reduce((a, c) => a + c.score, 0) : null;
+      btn.innerHTML = `<span class="h-title">${esc(r.scenario)}</span><span class="h-score">${tot(r.grade)}${r.grade2 ? '→' + tot(r.grade2) : ''}<small>/8</small></span><span class="h-meta">${fmtDate(r.createdAt)} · v1</span>`;
     }
-  } catch (e) {
-    toast(e.message, 5000);
-  } finally {
-    btn.disabled = false; swapLabel(btn, old);
+    btn.onclick = () => openDetail(r.id);
+    list.appendChild(btn);
+  });
+  show('home');
+}
+
+/* ---------- Recorder ---------- */
+let rec = null; // { mediaRecorder, chunks, stream, startedAt, timer, autoStop, resolve, reject }
+let recTimer = null;
+
+function fmtSec(s) { return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }
+function setRecUI(state, msg) {
+  const btn = $('btnRec');
+  btn.dataset.state = state;
+  btn.disabled = state === 'ready' || state === 'busy';
+  $('recState').textContent = msg;
+  $('speakCard').classList.toggle('recording', state === 'recording');
+}
+function pickMime() {
+  const c = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+  return c.find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m)) || '';
+}
+const blobToBase64 = blob => new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result.split(',')[1]); fr.onerror = rej; fr.readAsDataURL(blob); });
+
+// Returns { audio: {mimeType, data}, seconds } or { text } — whichever the user produced
+function capture(stage, { title, hint }) {
+  return new Promise((resolve, reject) => {
+    const card = $('speakCard');
+    card.hidden = false;
+    $('speakTitle').textContent = title;
+    $('speakHint').textContent = hint;
+    $('typedInput').value = '';
+    $('typedBox').open = false;
+    $('speakTimer').textContent = '';
+    setRecUI('idle', 'Tap to record — up to 45 seconds');
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    rec = { resolve, reject, chunks: [], mediaRecorder: null, stream: null, startedAt: 0 };
+  });
+}
+
+async function startRecording() {
+  if (!rec) return;
+  // 5 s to think — no typing, no hints
+  setRecUI('ready', 'Think. Don\'t write.');
+  for (let i = READY_S; i > 0; i--) {
+    $('speakTimer').textContent = `ready in ${i}`;
+    await new Promise(r => setTimeout(r, 1000));
+    if (!rec) return;
   }
+  const cur = rec;
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    if (rec !== cur) { stream.getTracks().forEach(t => t.stop()); return; }
+    const mime = pickMime();
+    const mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+    cur.stream = stream; cur.mediaRecorder = mr; cur.chunks = []; cur.startedAt = Date.now();
+    mr.ondataavailable = e => { if (e.data && e.data.size) cur.chunks.push(e.data); };
+    mr.onstop = async () => {
+      clearInterval(recTimer);
+      stream.getTracks().forEach(t => t.stop());
+      if (cur.abandoned || rec !== cur) return;
+      const seconds = Math.round((Date.now() - cur.startedAt) / 1000);
+      const blob = new Blob(cur.chunks, { type: mr.mimeType || mime || 'audio/mp4' });
+      if (!blob.size) { setRecUI('idle', 'Nothing recorded — try again'); return; }
+      setRecUI('busy', 'Listening back…');
+      try {
+        const data = await blobToBase64(blob);
+        if (rec !== cur) return;
+        rec = null;
+        cur.resolve({ audio: { mimeType: (blob.type || 'audio/mp4').split(';')[0], data }, seconds });
+      } catch (e) { setRecUI('idle', 'Could not read the recording — try again'); }
+    };
+    mr.start(250);
+    setRecUI('recording', 'Recording — tap to stop');
+    recTimer = setInterval(() => {
+      const s = Math.round((Date.now() - cur.startedAt) / 1000);
+      $('speakTimer').textContent = fmtSec(s);
+      $('speakTimer').classList.toggle('over', s >= 40);
+      if (s * 1000 >= MAX_REC_MS) stopRecording();
+    }, 250);
+  } catch (e) {
+    setRecUI('idle', 'Microphone not available here — dictate or type below');
+    $('typedBox').open = true;
+    $('typedInput').focus();
+  }
+}
+function stopRecording() {
+  if (rec?.mediaRecorder && rec.mediaRecorder.state !== 'inactive') rec.mediaRecorder.stop();
+}
+function sendTyped() {
+  const text = $('typedInput').value.trim();
+  if (!text) { toast('Say something first'); return; }
+  if (!rec) return;
+  const r = rec; rec = null;
+  r.abandoned = true;
+  clearInterval(recTimer);
+  try { if (r.mediaRecorder?.state === 'recording') r.mediaRecorder.stop(); } catch {}
+  r.stream?.getTracks().forEach(t => t.stop());
+  setRecUI('busy', 'Reading…');
+  r.resolve({ text });
+}
+function cancelCapture() {
+  clearInterval(recTimer);
+  if (rec) {
+    const r = rec; rec = null; r.abandoned = true;
+    try { if (r.mediaRecorder?.state === 'recording') r.mediaRecorder.stop(); } catch {}
+    r.stream?.getTracks().forEach(t => t.stop());
+    r.reject(new Error('cancelled'));
+  }
+  $('speakCard').hidden = true;
+}
+
+/* ---------- Session flow ---------- */
+let round = null;      // in-progress round
+let sessionToken = 0;  // bumps when the user leaves; running flow checks it
+
+function newRound(type, situation, listener, want, src) {
+  return { v: 2, id: crypto.randomUUID(), createdAt: Date.now(), type, src, situation, listener, want,
+    attempts: [], selfDiag: null, modelLine: null, why: null, take: '', takeReply: null,
+    variants: null, recall: null, field: null };
+}
+
+async function analyze(stage, input, extra) {
+  const parts = input.audio
+    ? [{ inline_data: { mime_type: input.audio.mimeType, data: input.audio.data } }, T('Analyse this recording as instructed.')]
+    : [T(`The user's attempt (typed or dictated):\n${input.text}`)];
+  const raw = await askJSON(analyzePrompt(round, stage, extra), parts, ANALYZE_SCHEMA);
+  const int = (v, d = 0) => Number.isFinite(+v) ? Math.max(0, Math.round(+v)) : d;
+  return {
+    stage, at: Date.now(), input: input.audio ? 'audio' : 'text', transcript: String(raw.transcript || input.text || ''),
+    metrics: { pointSentence: int(raw.point_sentence), wordsBeforePoint: int(raw.words_before_point), fillers: int(raw.fillers), restarts: int(raw.restarts), seconds: input.seconds || null },
+    issue: ISSUES.some(i => i.key === raw.biggest_issue) ? raw.biggest_issue : 'none',
+    note: String(raw.note || ''),
+    ctx: extra && (extra.situation || extra.question) ? { situation: extra.situation, listener: extra.listener, want: extra.want, question: extra.question } : null,
+  };
+}
+
+function metricsHtml(m) {
+  const pt = m.pointSentence === 0 ? '<b class="bad">point never came</b>' : m.pointSentence === 1 ? '<b class="good">point in sentence 1</b>' : `<b class="bad">point in sentence ${m.pointSentence}</b>`;
+  return `<div class="metrics">${pt} · ${m.wordsBeforePoint} words before it · fillers ${m.fillers} · restarts ${m.restarts}${m.seconds ? ` · ${m.seconds}s` : ''}</div>`;
+}
+function attemptCard(a, { showNote = true, ctx = null } = {}) {
+  const el = document.createElement('div');
+  el.className = 'card attempt';
+  el.innerHTML = `<div class="card-head"><h3>${esc(STAGE_LABEL[a.stage] || a.stage)}</h3><span class="pill pill-soft">${a.input === 'audio' ? 'voice' : 'text'}</span></div>
+    ${ctx ? `<p class="hint ctx">${esc(ctx)}</p>` : ''}
+    <p class="transcript">${esc(a.transcript)}</p>
+    ${metricsHtml(a.metrics)}
+    ${showNote && a.note ? `<p class="note">${esc(a.note)}</p>` : ''}`;
+  return el;
+}
+
+// One capture → analyse → card. Handles the "busy" UI and errors (retry loop stays on the same stage).
+async function attempt(stage, ui, extra) {
+  const myToken = sessionToken;
+  for (;;) {
+    let input;
+    try { input = await capture(stage, ui); } catch { return null; }   // cancelled
+    if (myToken !== sessionToken) return null;
+    try {
+      const a = await analyze(stage, input, extra);
+      if (myToken !== sessionToken) return null;
+      $('speakCard').hidden = true;
+      round.attempts.push(a);
+      const card = attemptCard(a, { showNote: stage !== 'first', ctx: extra?.question ? `Q: ${extra.question}` : extra?.situation ? extra.situation : null });
+      $('attempts').appendChild(card);
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      return a;
+    } catch (e) {
+      toast(e.message, 5000);
+      setRecUI('idle', 'Something went wrong — record again');
+      // loop: same stage again
+    }
+  }
+}
+
+function setStage(text) { $('stagePill').textContent = text; }
+
+async function startSession(type, situation, listener, want, src) {
+  if (!settings.apiKey) { toast('Add your Gemini API key in Settings first'); renderSettings(); return; }
+  round = newRound(type, situation, listener, want, src);
+  sessionToken++;
+  const t = TYPES[type];
+  $('typePill').textContent = t.label;
+  $('briefSit').textContent = situation; $('briefListener').textContent = listener || '—'; $('briefWant').textContent = want || '—';
+  $('attempts').innerHTML = '';
+  ['diagCard', 'patternCard', 'afterFinal', 'revealOut', 'takeOut', 'takeLine', 'speakCard'].forEach(id => $(id).hidden = true);
+  $('takeInput').value = ''; $('modelLine').textContent = ''; $('modelWhy').textContent = '';
+  $('briefCard').classList.remove('dim');
+  show('practice');
+  runFlow();
+}
+
+async function runFlow() {
+  const my = sessionToken;
+  const t = TYPES[round.type];
+
+  // 1) First attempt — no hints
+  setStage('1 · speak');
+  const first = await attempt('first', { title: 'Say it — as you would, right now', hint: 'No notes, no typing. Five seconds to think, then talk to the listener above.' });
+  if (!first || my !== sessionToken) return;
+
+  // 2) Self-diagnosis
+  setStage('2 · your call');
+  const selfDiag = await new Promise(res => {
+    const box = $('diagList'); box.innerHTML = '';
+    ISSUES.forEach(i => { const b = document.createElement('button'); b.className = 'diagbtn'; b.textContent = issueLabel(i.key); b.onclick = () => { box.querySelectorAll('button').forEach(x => x.classList.toggle('active', x === b)); res(i.key); }; box.appendChild(b); });
+    $('diagCard').hidden = false; $('diagCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  if (my !== sessionToken) return;
+  round.selfDiag = selfDiag;
+
+  // 3) Pattern
+  setStage('3 · the shape');
+  $('patternTitle').textContent = `The shape for a ${t.label.toLowerCase()}`;
+  $('patternSteps').innerHTML = t.steps.map((s, i) => `<div class="pstep"><span>${i + 1}</span><p>${esc(s)}</p></div>`).join('');
+  $('patternHint').textContent = 'Not a script — three slots. Fill them with your own words, out loud.';
+  $('patternCard').hidden = false; $('patternCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  await new Promise(res => { $('btnSpeakAgain').onclick = res; });
+  if (my !== sessionToken) return;
+
+  // 4) Second attempt — one fix
+  setStage('4 · again, with the shape');
+  const second = await attempt('second', { title: 'Say it again with the shape', hint: `${t.steps.map(s => s.split(' — ')[0]).join(' → ')}. Same listener, same want.` }, { selfDiag });
+  if (!second || my !== sessionToken) return;
+
+  // 5) Final — hide everything
+  setStage('5 · final, no hints');
+  $('patternCard').hidden = true; $('diagCard').hidden = true;
+  $('briefCard').classList.add('dim');
+  document.querySelectorAll('#attempts .attempt').forEach(c => c.classList.add('collapsed'));
+  const fin = await attempt('final', { title: 'Last time — everything hidden', hint: 'This is the version you will actually use. Go.' });
+  if (!fin || my !== sessionToken) return;
+  document.querySelectorAll('#attempts .attempt').forEach(c => c.classList.remove('collapsed'));
+
+  // 6) Optional: reveal / extend, then done
+  setStage('done · optional extras');
+  $('afterFinal').hidden = false; $('afterFinal').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  await DB.put(round); // save progress so a crash doesn't lose the session
+}
+
+async function reveal() {
+  const btn = $('btnReveal');
+  if (btn.disabled) return;
+  if (round.modelLine) { $('revealOut').hidden = false; return; }
+  btn.disabled = true; swapLabel(btn, 'Writing…');
+  try {
+    const p = modelPrompt(round);
+    const m = await askJSON(p.system, [T(p.user)], MODEL_SCHEMA, 4096);
+    round.modelLine = String(m.model_line || ''); round.why = String(m.why || '');
+    $('modelLine').textContent = round.modelLine; $('modelWhy').textContent = round.why;
+    $('revealOut').hidden = false;
+    await DB.put(round);
+  } catch (e) { toast(e.message, 5000); }
+  finally { btn.disabled = false; swapLabel(btn, 'Model line'); }
 }
 
 async function askTake() {
   const take = $('takeInput').value.trim();
   const btn = $('btnTake');
-  if (!take || !round?.grade) { toast('Write your take first'); return; }
+  if (!take || !round?.modelLine) { toast('Write your take first'); return; }
   if (btn.disabled) return;
   btn.disabled = true; swapLabel(btn, 'Thinking…');
   try {
-    const p = takePrompt(round.mode, round.scenario, round.audience, round.answer, round.grade.model_line, take);
-    const t = await askJSON(p.system, p.user, TAKE_SCHEMA, 4096);
+    const p = takePrompt(round, round.modelLine, take);
+    const t = await askJSON(p.system, [T(p.user)], TAKE_SCHEMA, 4096);
     round.take = take; round.takeReply = { reply: String(t.reply || ''), revised_line: String(t.revised_line || '').trim() };
     $('takeReply').textContent = round.takeReply.reply;
     $('takeLine').textContent = round.takeReply.revised_line;
     $('takeLine').hidden = !round.takeReply.revised_line;
     $('takeOut').hidden = false;
+    await DB.put(round);
   } catch (e) { toast(e.message, 5000); }
   finally { btn.disabled = false; swapLabel(btn, 'Ask'); }
 }
 
-async function finishRound(next) {
-  if (!round || !round.grade) { renderHome(); return; }
+async function extend() {
+  const btn = $('btnExtend');
+  if (btn.disabled) return;
+  const my = sessionToken;
+  btn.disabled = true; swapLabel(btn, 'Building variants…');
+  try {
+    if (!round.variants) {
+      const p = variantsPrompt(round);
+      round.variants = await askJSON(p.system, [T(p.user)], VARIANTS_SCHEMA, 4096);
+      await DB.put(round);
+    }
+  } catch (e) { toast(e.message, 5000); btn.disabled = false; swapLabel(btn, 'Extend: 2 variants + a follow-up'); return; }
+  btn.hidden = true;
+  const v = round.variants;
+  setStage('extend · near variant');
+  const near = await attempt('near', { title: 'Near variant — same shape, new facts', hint: v.near.situation + ` (Listener: ${v.near.listener}. You want: ${v.near.want})` }, { situation: v.near.situation, listener: v.near.listener, want: v.near.want });
+  if (!near || my !== sessionToken) return;
+  setStage('extend · far variant');
+  const far = await attempt('far', { title: 'Far variant — same shape, different world', hint: v.far.situation + ` (Listener: ${v.far.listener}. You want: ${v.far.want})` }, { situation: v.far.situation, listener: v.far.listener, want: v.far.want });
+  if (!far || my !== sessionToken) return;
+  setStage('extend · follow-up');
+  const fu = await attempt('followup', { title: 'They fire back a question — answer it', hint: `"${v.followup}" — answer first, then the reason.` }, { question: v.followup });
+  if (!fu || my !== sessionToken) return;
+  setStage('done');
   await DB.put(round);
-  const mode = round.mode;
-  round = null;
-  if (next) startRound(mode);
-  else { toast('Saved. See you tomorrow.'); renderHome(); }
+  $('afterFinal').scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function finishSession() {
+  if (!round) { renderHome(); return; }
+  if (!round.recall) round.recall = { dueAt: Date.now() + RECALL_H * 3600_000, doneAt: null, situation: null };
+  await DB.put(round);
+  round = null; sessionToken++;
+  toast('Saved. Now go say it for real.');
+  renderHome();
+}
+
+/* Recall: two days later, one far-ish variant, one attempt */
+async function startRecall(r) {
+  if (!settings.apiKey) { renderSettings(); return; }
+  round = r; sessionToken++;
+  const my = sessionToken;
+  const t = TYPES[r.type];
+  $('typePill').textContent = t.label; setStage('recall');
+  $('briefSit').textContent = r.situation; $('briefListener').textContent = r.listener || '—'; $('briefWant').textContent = r.want || '—';
+  $('attempts').innerHTML = '';
+  ['diagCard', 'patternCard', 'afterFinal', 'speakCard'].forEach(id => $(id).hidden = true);
+  $('briefCard').classList.add('dim');
+  show('practice');
+  let v;
+  $('speakCard').hidden = false; $('speakTitle').textContent = 'Two days later'; $('speakHint').textContent = 'Writing a new situation…'; setRecUI('busy', '');
+  try {
+    // a fresh far variant each recall
+    const p = variantsPrompt(round); const nv = await askJSON(p.system, [T(p.user)], VARIANTS_SCHEMA, 4096);
+    v = nv.far;
+  } catch (e) { toast(e.message, 5000); renderHome(); return; }
+  if (my !== sessionToken) return;
+  const a = await attempt('recall', { title: 'Two days later — same shape, new situation', hint: v.situation + ` (Listener: ${v.listener}. You want: ${v.want})` }, { situation: v.situation, listener: v.listener, want: v.want });
+  if (!a || my !== sessionToken) return;
+  round.recall = { dueAt: round.recall?.dueAt || Date.now(), doneAt: Date.now(), situation: v.situation };
+  await DB.put(round);
+  round = null; sessionToken++;
+  toast(hit(a) ? 'Shape survived. Saved.' : 'Saved — the shape slipped; look at the note.');
+  setTimeout(renderHome, 1800);
+}
+
+/* Generated situation → same flow */
+async function generateSituation() {
+  if (!settings.apiKey) { renderSettings(); return; }
+  const btn = $('btnGenerate');
+  btn.disabled = true; const old = btn.textContent; btn.textContent = 'Writing…';
+  try {
+    const recent = (await DB.all()).filter(r => r.v === 2 && r.type === settings.type).sort((a, b) => b.createdAt - a.createdAt).slice(0, 8).map(r => r.situation.slice(0, 100));
+    const p = situationPrompt(settings.type, recent);
+    const s = await askJSON(p.system, [T(p.user)], SITUATION_SCHEMA, 4096);
+    $('sitInput').value = s.situation; $('listenerInput').value = s.listener; $('wantInput').value = s.want;
+    toast('Filled in — read it once, then get ready to speak');
+  } catch (e) { toast(e.message, 5000); }
+  finally { btn.disabled = false; btn.textContent = old; }
 }
 
 /* ---------- Detail ---------- */
@@ -506,18 +746,42 @@ async function openDetail(id) {
   const r = await DB.get(id);
   if (!r) return renderHome();
   currentDetail = r;
-  const crit = g => g.criteria.map(c => `<div class="crit"><span class="crit-mark s${c.score}">${c.score}</span><div><strong>${esc(critName(c.key))}</strong><p>${esc(c.note)}</p></div></div>`).join('');
-  $('detailBody').innerHTML = `
-    <div class="practice-head"><span class="pill">${MODES[r.mode].label}</span><span class="pill pill-soft">${r.src === 'real' ? 'real situation' : 'generated'}</span></div>
-    <p class="detail-meta">${new Date(r.createdAt).toLocaleString(LOCALE)}</p>
-    <div class="card"><h3>Scenario</h3><p class="detail-q">${esc(r.scenario)}</p>${r.audience ? `<p class="hint">${esc(r.audience)}</p>` : ''}</div>
-    <div class="card"><div class="card-head"><h3>First attempt</h3><span class="score">${total(r.grade)}<small>/8</small></span></div>
-      <div class="detail-answer">${esc(r.answer)}</div><div class="criteria">${crit(r.grade)}</div></div>
-    <div class="card"><h3>Model line</h3><blockquote class="model-line">${esc(r.grade.model_line)}</blockquote><p class="hint">${esc(r.grade.why)}</p>
-      ${r.takeReply ? `<p class="hint"><b>Your take:</b> ${esc(r.take)}</p><p class="take-reply">${esc(r.takeReply.reply)}</p>${r.takeReply.revised_line ? `<blockquote class="model-line">${esc(r.takeReply.revised_line)}</blockquote>` : ''}` : ''}</div>
-    ${r.grade2 ? `<div class="card"><div class="card-head"><h3>Rewrite</h3><span class="score">${total(r.grade2)}<small>/8</small></span></div>
-      <div class="detail-answer">${esc(r.rewrite)}</div><div class="criteria">${crit(r.grade2)}</div></div>` : ''}`;
+  const body = $('detailBody');
+  if (r.v === 2) {
+    body.innerHTML = `
+      <div class="practice-head"><span class="pill">${TYPES[r.type].label}</span><span class="pill pill-soft">${r.src === 'generated' ? 'generated' : 'real'}</span></div>
+      <p class="detail-meta">${new Date(r.createdAt).toLocaleString(LOCALE)}</p>
+      <div class="card brief"><p class="brief-line"><span class="brief-k">Situation</span><span>${esc(r.situation)}</span></p><p class="brief-line"><span class="brief-k">Listener</span><span>${esc(r.listener || '—')}</span></p><p class="brief-line"><span class="brief-k">You want</span><span>${esc(r.want || '—')}</span></p></div>
+      ${r.selfDiag ? `<p class="hint">Your call after the first try: <b>${esc(issueLabel(r.selfDiag))}</b></p>` : ''}
+      <div id="detailAttempts"></div>
+      ${r.modelLine ? `<div class="card"><h3>Model line</h3><blockquote class="model-line">${esc(r.modelLine)}</blockquote><p class="hint">${esc(r.why)}</p>${r.takeReply ? `<p class="hint"><b>Your take:</b> ${esc(r.take)}</p><p class="take-reply">${esc(r.takeReply.reply)}</p>${r.takeReply.revised_line ? `<blockquote class="model-line">${esc(r.takeReply.revised_line)}</blockquote>` : ''}` : ''}</div>` : ''}
+      ${r.field ? `<div class="card"><h3>Field result</h3><p>${r.field.reasked ? 'Someone asked "so what do you need?"' : 'Nobody had to ask what you needed'} · ${r.field.decisionClear ? 'decision clear' : 'decision unclear'}${r.field.note ? ` · ${esc(r.field.note)}` : ''}</p></div>` : ''}`;
+    const da = body.querySelector('#detailAttempts');
+    r.attempts.forEach(a => da.appendChild(attemptCard(a, { showNote: true, ctx: a.ctx?.question ? `Q: ${a.ctx.question}` : a.ctx?.situation || null })));
+    $('fieldCard').hidden = false;
+    document.querySelectorAll('#reaskSeg button').forEach(b => b.classList.toggle('active', r.field && String(r.field.reasked) === (b.dataset.v === 'yes' ? 'true' : 'false')));
+    document.querySelectorAll('#clearSeg button').forEach(b => b.classList.toggle('active', r.field && String(r.field.decisionClear) === (b.dataset.v === 'yes' ? 'true' : 'false')));
+    $('fieldNote').value = r.field?.note || '';
+  } else {
+    const tot = g => g ? g.criteria.reduce((a, c) => a + c.score, 0) : null;
+    const crit = g => g.criteria.map(c => `<div class="crit"><span class="crit-mark s${c.score}">${c.score}</span><div><strong>${esc(c.key)}</strong><p>${esc(c.note)}</p></div></div>`).join('');
+    body.innerHTML = `<p class="detail-meta">${new Date(r.createdAt).toLocaleString(LOCALE)} · v1 round</p>
+      <div class="card"><h3>Scenario</h3><p class="detail-q">${esc(r.scenario)}</p></div>
+      <div class="card"><div class="card-head"><h3>First attempt</h3><span class="score">${tot(r.grade)}<small>/8</small></span></div><div class="detail-answer">${esc(r.answer)}</div><div class="criteria">${crit(r.grade)}</div></div>
+      <div class="card"><h3>Model line</h3><blockquote class="model-line">${esc(r.grade.model_line)}</blockquote></div>
+      ${r.grade2 ? `<div class="card"><div class="card-head"><h3>Rewrite</h3><span class="score">${tot(r.grade2)}<small>/8</small></span></div><div class="detail-answer">${esc(r.rewrite)}</div></div>` : ''}`;
+    $('fieldCard').hidden = true;
+  }
   show('detail');
+}
+async function saveField() {
+  if (!currentDetail || currentDetail.v !== 2) return;
+  const re = document.querySelector('#reaskSeg button.active')?.dataset.v, cl = document.querySelector('#clearSeg button.active')?.dataset.v;
+  if (!re || !cl) { toast('Answer both questions'); return; }
+  currentDetail.field = { reasked: re === 'yes', decisionClear: cl === 'yes', note: $('fieldNote').value.trim(), at: Date.now() };
+  await DB.put(currentDetail);
+  toast('Saved — that\'s the number that matters');
+  renderHome();
 }
 
 /* ---------- Backup ---------- */
@@ -529,7 +793,7 @@ function downloadBlob(blob, name) {
 async function backupAll() {
   const rounds = await DB.all();
   if (!rounds.length) { toast('Nothing to export yet'); return; }
-  const payload = { app: 'SayFirst', version: 1, exportedAt: new Date().toISOString(), rounds };
+  const payload = { app: 'SayFirst', version: 2, exportedAt: new Date().toISOString(), rounds };
   const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
   const d = new Date();
   const name = `sayfirst-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}.json`;
@@ -545,7 +809,7 @@ async function restoreFromFile(file) {
   const list = Array.isArray(data?.rounds) ? data.rounds : null;
   if (!list) { toast('Not a SayFirst backup'); return; }
   let n = 0;
-  for (const r of list) { if (r?.id && r.grade) { await DB.put(r); n++; } }
+  for (const r of list) { if (r?.id && (r.v === 2 || r.grade)) { await DB.put(r); n++; } }
   toast(`Restored ${n} round${n === 1 ? '' : 's'}`);
   renderHome();
 }
@@ -566,34 +830,46 @@ function renderSettings() {
 
 /* ---------- Bind ---------- */
 function bind() {
-  $('btnHome').onclick = () => { if (round?.grade && !confirm('Leave without saving this round?')) return; round = null; stopTimer(); renderHome(); };
-  $('btnSettings').onclick = renderSettings;
-  document.querySelectorAll('.mode-card').forEach(b => b.onclick = () => startRound(b.dataset.mode));
-  $('srcSeg').onclick = e => {
-    if (!e.target.dataset.src) return;
-    settings.src = e.target.dataset.src; Settings.save(settings);
-    document.querySelectorAll('#srcSeg button').forEach(b => b.classList.toggle('active', b.dataset.src === settings.src));
+  $('btnHome').onclick = () => {
+    if (round && round.attempts?.length && !round.recall && !confirm('Leave this session? Progress so far is kept.')) return;
+    if (round && round.attempts?.length) DB.put(round);
+    cancelCapture(); round = null; sessionToken++; renderHome();
   };
-  $('btnUseReal').onclick = useReal;
-  $('btnRegen').onclick = generateScenario;
-  $('btnGrade').onclick = () => grade(false);
-  $('btnRegrade').onclick = () => grade(true);
+  $('btnSettings').onclick = renderSettings;
+
+  $('typeSeg').onclick = e => {
+    if (!e.target.dataset.type) return;
+    settings.type = e.target.dataset.type; Settings.save(settings);
+    document.querySelectorAll('#typeSeg button').forEach(b => b.classList.toggle('active', b.dataset.type === settings.type));
+    $('typeHint').textContent = TYPES[settings.type].hint;
+  };
+  $('btnStart').onclick = () => {
+    const sit = $('sitInput').value.trim(), lis = $('listenerInput').value.trim(), want = $('wantInput').value.trim();
+    if (!sit) { toast('Describe the situation first'); $('sitInput').focus(); return; }
+    if (!want) { toast('What do you want from them? That is the point.'); $('wantInput').focus(); return; }
+    startSession(settings.type, sit, lis, want, 'real');
+    $('sitInput').value = ''; $('listenerInput').value = ''; $('wantInput').value = '';
+  };
+  $('btnGenerate').onclick = generateSituation;
+
+  $('btnRec').onclick = () => { const s = $('btnRec').dataset.state; if (s === 'recording') stopRecording(); else if (s === 'idle') startRecording(); };
+  $('btnTypedSend').onclick = sendTyped;
+  $('btnReveal').onclick = reveal;
   $('btnTake').onclick = askTake;
-  $('btnEditAnswer').onclick = () => setAnswerLocked(false);
-  ['realInput', 'audienceInput', 'answerInput', 'rewriteInput', 'takeInput', 'ctxInput'].forEach(id => attachTools(id));
-  ['modelLine', 'takeLine'].forEach(id => attachTools(id, { clear: false }));
-  $('btnDone').onclick = () => finishRound(false);
-  $('btnAnother').onclick = () => finishRound(true);
+  $('btnExtend').onclick = extend;
+  $('btnDone').onclick = finishSession;
+
+  $('reaskSeg').onclick = e => { if (e.target.dataset.v) document.querySelectorAll('#reaskSeg button').forEach(b => b.classList.toggle('active', b === e.target)); };
+  $('clearSeg').onclick = e => { if (e.target.dataset.v) document.querySelectorAll('#clearSeg button').forEach(b => b.classList.toggle('active', b === e.target)); };
+  $('btnSaveField').onclick = saveField;
   $('btnDeleteEntry').onclick = async () => {
     if (!currentDetail || !confirm('Delete this entry?')) return;
     await DB.del(currentDetail.id); toast('Deleted'); renderHome();
   };
 
   $('btnShowKey').onclick = e => {
-    const i = $('apiKeyInput');
-    const showing = i.type === 'password';
-    i.type = showing ? 'text' : 'password';
-    e.currentTarget.setAttribute('aria-pressed', String(showing));
+    const i = $('apiKeyInput'); const showing = i.type === 'password';
+    i.type = showing ? 'text' : 'password'; e.currentTarget.setAttribute('aria-pressed', String(showing));
   };
   $('btnForgetKey').onclick = () => {
     if (!confirm('Remove the API key from this device?')) return;
@@ -620,7 +896,6 @@ function bind() {
     settings.apiKey = $('apiKeyInput').value.trim();
     settings.rememberKey = $('rememberKey').checked;
     const picked = $('modelSel').value || settings.model;
-    // First save with a key and no explicit model choice: pick the newest stable Flash
     if (!settings.modelPicked && settings.apiKey && picked === DEFAULT_MODEL) {
       try { settings.model = pickDefaultModel(await fetchModels()); } catch { settings.model = picked; }
     } else settings.model = picked;
@@ -633,7 +908,10 @@ function bind() {
   $('btnBackup').onclick = backupAll;
   $('btnRestore').onclick = () => $('restoreInput').click();
   $('restoreInput').onchange = async e => { const f = e.target.files[0]; e.target.value = ''; if (f) await restoreFromFile(f); };
-  window.addEventListener('beforeunload', e => { if (round?.grade) { e.preventDefault(); e.returnValue = ''; } });
+
+  ['sitInput', 'listenerInput', 'wantInput', 'typedInput', 'takeInput', 'ctxInput', 'fieldNote'].forEach(id => attachTools(id));
+  ['modelLine', 'takeLine'].forEach(id => attachTools(id, { clear: false }));
+  window.addEventListener('beforeunload', e => { if (round && round.attempts?.length && !round.recall) { e.preventDefault(); e.returnValue = ''; } });
 }
 
 /* ---------- Init ---------- */
