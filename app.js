@@ -167,6 +167,8 @@ Score each criterion 0–2 (2 = fully there, 1 = partly, 0 = missing):
 
 Be strict — a 2 means a native colleague would need zero clarifying questions. Notes must quote the user's words and say what to change. Ignore minor grammar unless it hides the meaning; this is about structure. Also penalise answers that ignore the expected shape (e.g. five sentences for the one-liner, or a screen walkthrough for the pitch).
 
+Everyone in the user's workplace is a non-native English speaker (English is the shared language, nobody's mother tongue). So the model_line must use plain, common words and short sentences — roughly 15 words per sentence, no idioms, no clever phrasing. If it sounds like a native-speaker's polished line, it is wrong. Also give a 0 or 1 on "sentences" when the user's sentence would be hard for a non-native listener to follow.
+
 model_line and any quoted English stay in English. Write the notes and "why" in ${langName(settings.lang)}. Output JSON only.`,
     user: `Scenario: ${scenario}
 Listener: ${audience || 'not specified'}
